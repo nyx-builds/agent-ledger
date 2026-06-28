@@ -13,6 +13,14 @@ from .reports import (
     generate_trial_balance, generate_income_statement, generate_balance_sheet,
     format_trial_balance, format_income_statement, format_balance_sheet,
 )
+from .closing import close_period
+from .hierarchy import AccountHierarchy
+from .audit import AuditAction
+from .export import (
+    export_accounts_csv, export_entries_csv, export_trial_balance_csv,
+    export_income_statement_csv, export_balance_sheet_csv,
+    export_hierarchy_csv,
+)
 from .exceptions import LedgerError
 
 
@@ -61,6 +69,7 @@ TOOLS = [
                 },
                 "currency": {"type": "string", "description": "Currency code", "default": "USD"},
                 "description": {"type": "string", "description": "Account description", "default": ""},
+                "parent_code": {"type": "string", "description": "Parent account code for hierarchy", "default": None},
             },
             "required": ["code", "name", "account_type"],
         },
@@ -222,6 +231,109 @@ TOOLS = [
             "properties": {},
         },
     },
+    # ── v0.2.0 New Tools ────────────────────────────────────────
+    {
+        "name": "close_period",
+        "description": "Close the current accounting period — zeros out revenue and expense accounts into retained earnings",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "retained_earnings_code": {
+                    "type": "string",
+                    "description": "Account code for retained earnings (created as equity if not exists)",
+                    "default": "retained_earnings",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Custom description for the closing entry",
+                    "default": None,
+                },
+            },
+        },
+    },
+    {
+        "name": "get_account_hierarchy",
+        "description": "Get the account hierarchy tree with rollup balances",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "root_code": {
+                    "type": "string",
+                    "description": "Optional root account code to start the tree from",
+                    "default": None,
+                },
+            },
+        },
+    },
+    {
+        "name": "get_rollup_balance",
+        "description": "Get the rolled-up balance for an account including all descendant accounts",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Account code"},
+            },
+            "required": ["code"],
+        },
+    },
+    {
+        "name": "validate_hierarchy",
+        "description": "Validate the account hierarchy for issues (missing parents, type mismatches, circular references)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "list_audit_log",
+        "description": "List audit log entries tracking all changes to the ledger",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [a.value for a in AuditAction],
+                    "description": "Filter by action type",
+                    "default": None,
+                },
+                "actor": {"type": "string", "description": "Filter by actor", "default": None},
+                "limit": {"type": "integer", "description": "Max entries", "default": 50},
+            },
+        },
+    },
+    {
+        "name": "export_csv",
+        "description": "Export ledger data as CSV (accounts, entries, trial balance, income statement, balance sheet, or hierarchy)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": ["accounts", "entries", "trial_balance", "income_statement", "balance_sheet", "hierarchy"],
+                    "description": "Type of data to export",
+                },
+                "account_code": {
+                    "type": "string",
+                    "description": "Filter by account (for entries export only)",
+                    "default": None,
+                },
+                "tag": {
+                    "type": "string",
+                    "description": "Filter by tag (for entries export only)",
+                    "default": None,
+                },
+            },
+            "required": ["type"],
+        },
+    },
+    {
+        "name": "list_closed_periods",
+        "description": "List all closed period records",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
 ]
 
 
@@ -252,6 +364,7 @@ def _dispatch(ledger: Ledger, name: str, args: dict) -> Any:
             account_type=AccountType(args["account_type"]),
             currency=args.get("currency", "USD"),
             description=args.get("description", ""),
+            parent_code=args.get("parent_code"),
         )
         return _account_to_dict(account)
 
@@ -337,8 +450,97 @@ def _dispatch(ledger: Ledger, name: str, args: dict) -> Any:
         converter = ledger.get_currency_converter()
         return [json.loads(r.model_dump_json()) for r in converter.list_rates()]
 
+    # ── v0.2.0 Tools ───────────────────────────────────────────
+
+    elif name == "close_period":
+        result = close_period(
+            ledger,
+            retained_earnings_code=args.get("retained_earnings_code", "retained_earnings"),
+            description=args.get("description"),
+        )
+        return {
+            "status": "closed",
+            "closing_entry_id": result.closing_entry.id,
+            "revenue_accounts_closed": result.revenue_accounts_closed,
+            "expense_accounts_closed": result.expense_accounts_closed,
+            "net_income": result.net_income,
+            "retained_earnings_account": result.retained_earnings_account,
+            "closed_at": result.closed_at.isoformat(),
+        }
+
+    elif name == "get_account_hierarchy":
+        hierarchy = AccountHierarchy(ledger)
+        tree = hierarchy.get_tree(root_code=args.get("root_code"))
+        return _serialize_tree(tree)
+
+    elif name == "get_rollup_balance":
+        hierarchy = AccountHierarchy(ledger)
+        rollup = hierarchy.get_rollup_balance(args["code"])
+        return json.loads(rollup.model_dump_json())
+
+    elif name == "validate_hierarchy":
+        hierarchy = AccountHierarchy(ledger)
+        warnings = hierarchy.validate_hierarchy()
+        return {"valid": len(warnings) == 0, "warnings": warnings}
+
+    elif name == "list_audit_log":
+        action_enum = AuditAction(args["action"]) if "action" in args and args["action"] else None
+        entries = ledger.audit.list_entries(
+            action=action_enum,
+            actor=args.get("actor"),
+            limit=args.get("limit", 50),
+        )
+        return [json.loads(e.model_dump_json()) for e in entries]
+
+    elif name == "export_csv":
+        export_type = args["type"]
+        if export_type == "accounts":
+            csv_content = export_accounts_csv(ledger)
+        elif export_type == "entries":
+            csv_content = export_entries_csv(
+                ledger,
+                account_code=args.get("account_code"),
+                tag=args.get("tag"),
+            )
+        elif export_type == "trial_balance":
+            csv_content = export_trial_balance_csv(ledger)
+        elif export_type == "income_statement":
+            csv_content = export_income_statement_csv(ledger)
+        elif export_type == "balance_sheet":
+            csv_content = export_balance_sheet_csv(ledger)
+        elif export_type == "hierarchy":
+            csv_content = export_hierarchy_csv(ledger)
+        else:
+            return {"error": f"Unknown export type: {export_type}"}
+        return {"format": "csv", "data": csv_content}
+
+    elif name == "list_closed_periods":
+        return ledger.get_closed_periods()
+
     else:
         raise LedgerError(f"Unknown tool: {name}")
+
+
+def _serialize_tree(tree: list[dict]) -> list[dict]:
+    """Serialize account tree to JSON-safe dicts."""
+    result = []
+    for node in tree:
+        result.append(_serialize_tree_node(node))
+    return result
+
+
+def _serialize_tree_node(node: dict) -> dict:
+    """Serialize a single tree node."""
+    account = node["account"]
+    balance = node["balance"]
+    rollup = node["rollup_balance"]
+    return {
+        "account": _account_to_dict(account),
+        "balance": json.loads(balance.model_dump_json()),
+        "rollup_balance": json.loads(rollup.model_dump_json()),
+        "depth": node["depth"],
+        "children": [_serialize_tree_node(c) for c in node["children"]],
+    }
 
 
 # ── MCP Server Entry Point ─────────────────────────────────────

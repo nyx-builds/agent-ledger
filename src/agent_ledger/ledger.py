@@ -11,11 +11,13 @@ from .models import (
 )
 from .storage import Storage
 from .currency import CurrencyConverter
+from .audit import AuditLog, AuditAction
 from .exceptions import (
     AccountNotFoundError, AccountAlreadyExistsError,
     EntryDoesNotBalanceError, InvalidAccountTypeError,
     CannotDeleteAccountError, CurrencyMismatchError,
     JournalEntryNotFoundError, ReconciliationError,
+    AccountHasChildrenError,
 )
 
 
@@ -25,20 +27,36 @@ class Ledger:
     def __init__(self, storage: Storage):
         self._storage = storage
         self._data: Optional[LedgerData] = None
+        self._audit = AuditLog()
 
     @property
     def data(self) -> LedgerData:
         if self._data is None:
             self._data = self._storage.load()
+            # Load audit log from persisted data
+            if self._data.audit_log and self._data.audit_log.entries:
+                self._audit.from_dict_list(self._data.audit_log.entries)
         return self._data
+
+    @property
+    def audit(self) -> AuditLog:
+        """Access the audit log."""
+        # Ensure data is loaded
+        _ = self.data
+        return self._audit
 
     def reload(self) -> None:
         """Reload data from storage."""
         self._data = self._storage.load()
+        if self._data.audit_log and self._data.audit_log.entries:
+            self._audit = AuditLog()
+            self._audit.from_dict_list(self._data.audit_log.entries)
 
     def save(self) -> None:
         """Save current data to storage."""
         if self._data is not None:
+            # Sync audit log to data
+            self._data.audit_log.entries = self._audit.to_dict_list()
             self._storage.save(self._data)
 
     # ── Account Management ──────────────────────────────────────
@@ -59,6 +77,11 @@ class Ledger:
         if code in self.data.accounts:
             raise AccountAlreadyExistsError(f"Account '{code}' already exists")
 
+        # Validate parent exists if specified
+        if parent_code:
+            parent_code = parent_code.strip().lower()
+            self.get_account(parent_code)
+
         account = Account(
             code=code,
             name=name,
@@ -70,6 +93,11 @@ class Ledger:
         )
 
         self.data.accounts[code] = account
+        self.audit.log(
+            action=AuditAction.ACCOUNT_CREATE,
+            details={"code": code, "name": name, "type": account_type.value},
+            after={"code": code, "name": name, "type": account_type.value},
+        )
         self.save()
         return account
 
@@ -90,6 +118,8 @@ class Ledger:
     ) -> Account:
         """Update an existing account."""
         account = self.get_account(code)
+        before = {"name": account.name, "description": account.description, "active": account.active}
+
         if name is not None:
             account.name = name
         if description is not None:
@@ -98,18 +128,45 @@ class Ledger:
             account.active = active
         if metadata is not None:
             account.metadata.update(metadata)
+
+        self.audit.log(
+            action=AuditAction.ACCOUNT_UPDATE,
+            details={"code": code},
+            before=before,
+            after={"name": account.name, "description": account.description, "active": account.active},
+        )
         self.save()
         return account
 
     def delete_account(self, code: str) -> None:
-        """Delete an account if it has zero balance."""
+        """Delete an account if it has zero balance and no children."""
         code = code.strip().lower()
         balance = self.get_account_balance(code)
+
+        # Check for zero balance
         if balance.raw_balance != 0:
             raise CannotDeleteAccountError(
                 f"Cannot delete account '{code}' with non-zero balance: {balance.raw_balance}"
             )
+
+        # Check for children
+        children = [
+            a for a in self.data.accounts.values()
+            if a.parent_code == code
+        ]
+        if children:
+            child_codes = [c.code for c in children]
+            raise AccountHasChildrenError(
+                f"Cannot delete account '{code}' with child accounts: {child_codes}"
+            )
+
+        before = {"code": code, "name": self.data.accounts[code].name}
         del self.data.accounts[code]
+        self.audit.log(
+            action=AuditAction.ACCOUNT_DELETE,
+            details={"code": code},
+            before=before,
+        )
         self.save()
 
     def list_accounts(
@@ -155,6 +212,16 @@ class Ledger:
         )
 
         self.data.entries.append(entry)
+        self.audit.log(
+            action=AuditAction.ENTRY_POST,
+            details={
+                "entry_id": entry.id,
+                "description": description,
+                "total_debits": entry.total_debits,
+                "total_credits": entry.total_credits,
+            },
+            after={"entry_id": entry.id, "description": description},
+        )
         self.save()
         return entry
 
@@ -172,6 +239,14 @@ class Ledger:
             raise ReconciliationError(
                 f"Cannot delete reconciled entry '{entry_id}'"
             )
+        self.audit.log(
+            action=AuditAction.ENTRY_DELETE,
+            details={
+                "entry_id": entry_id,
+                "description": entry.description,
+            },
+            before={"entry_id": entry_id, "description": entry.description},
+        )
         self.data.entries.remove(entry)
         self.save()
 
@@ -211,6 +286,10 @@ class Ledger:
         """Mark a journal entry as reconciled."""
         entry = self.get_entry(entry_id)
         entry.reconciled = True
+        self.audit.log(
+            action=AuditAction.ENTRY_RECONCILE,
+            details={"entry_id": entry_id},
+        )
         self.save()
         return entry
 
@@ -218,6 +297,10 @@ class Ledger:
         """Mark a journal entry as unreconciled."""
         entry = self.get_entry(entry_id)
         entry.reconciled = False
+        self.audit.log(
+            action=AuditAction.ENTRY_UNRECONCILE,
+            details={"entry_id": entry_id},
+        )
         self.save()
         return entry
 
@@ -296,9 +379,24 @@ class Ledger:
             source=source,
         )
         self.data.exchange_rates.append(exchange_rate)
+        self.audit.log(
+            action=AuditAction.EXCHANGE_RATE_ADD,
+            details={"from": from_currency, "to": to_currency, "rate": rate},
+        )
         self.save()
         return exchange_rate
 
     def get_currency_converter(self) -> CurrencyConverter:
         """Get a CurrencyConverter populated with this ledger's rates."""
         return CurrencyConverter(self.data.exchange_rates)
+
+    # ── Closed Periods ──────────────────────────────────────────
+
+    def record_closed_period(self, period_data: dict) -> None:
+        """Record a closed period in the ledger data."""
+        self.data.closed_periods.append(period_data)
+        self.save()
+
+    def get_closed_periods(self) -> list[dict]:
+        """Get list of closed periods."""
+        return list(self.data.closed_periods)

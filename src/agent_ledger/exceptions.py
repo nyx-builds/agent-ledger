@@ -59,3 +59,13 @@ class ReconciliationError(LedgerError):
 class LedgerNotInitializedError(LedgerError):
     """Ledger has not been initialized."""
     pass
+
+
+class PeriodCloseError(LedgerError):
+    """Error during period close."""
+    pass
+
+
+class AccountHasChildrenError(LedgerError):
+    """Account has child accounts and cannot be deleted."""
+    pass

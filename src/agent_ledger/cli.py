@@ -19,6 +19,14 @@ from .reports import (
     generate_trial_balance, generate_income_statement, generate_balance_sheet,
     format_trial_balance, format_income_statement, format_balance_sheet,
 )
+from .closing import close_period
+from .hierarchy import AccountHierarchy
+from .export import (
+    export_accounts_csv, export_entries_csv, export_trial_balance_csv,
+    export_income_statement_csv, export_balance_sheet_csv,
+    export_account_transactions_csv, export_hierarchy_csv, write_csv_to_file,
+)
+from .audit import AuditAction
 from .exceptions import LedgerError
 
 console = Console()
@@ -131,6 +139,7 @@ def account_list(ctx, account_type, active_only):
     table.add_column("Type", style="magenta")
     table.add_column("Currency", style="green")
     table.add_column("Balance", justify="right", style="yellow")
+    table.add_column("Parent", style="dim")
     table.add_column("Active")
 
     for acct in accounts:
@@ -141,6 +150,7 @@ def account_list(ctx, account_type, active_only):
             acct.account_type.value,
             acct.currency,
             f"{balance.balance:,.2f}",
+            acct.parent_code or "",
             "✓" if acct.active else "✗",
         )
 
@@ -162,7 +172,8 @@ def account_show(ctx, code):
         f"[cyan]{account.code}[/cyan] - {account.name}\n"
         f"Type: {account.account_type.value}  |  Currency: {account.currency}\n"
         f"Balance: {balance.balance:,.2f}  |  Raw: {balance.raw_balance:,.2f}\n"
-        f"Debits: {balance.debit_total:,.2f}  |  Credits: {balance.credit_total:,.2f}",
+        f"Debits: {balance.debit_total:,.2f}  |  Credits: {balance.credit_total:,.2f}\n"
+        f"Parent: {account.parent_code or 'None'}",
         title="Account Details",
     ))
 
@@ -191,12 +202,26 @@ def account_show(ctx, code):
         console.print(table)
 
 
+@account.command("update")
+@click.argument("code")
+@click.option("--name", "-n", default=None, help="New account name")
+@click.option("--description", "-d", default=None, help="New description")
+@click.option("--active/--inactive", default=None, help="Set active status")
+@click.pass_context
+@handle_error
+def account_update(ctx, code, name, description, active):
+    """Update an existing account."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    account = ledger.update_account(code, name=name, description=description, active=active)
+    console.print(f"[green]✓[/green] Account updated: {account.code} - {account.name}")
+
+
 @account.command("delete")
 @click.argument("code")
 @click.pass_context
 @handle_error
 def account_delete(ctx, code):
-    """Delete an account (must have zero balance)."""
+    """Delete an account (must have zero balance and no children)."""
     ledger = get_ledger(ctx.obj["ledger_file"])
     ledger.delete_account(code)
     console.print(f"[green]✓[/green] Account '{code}' deleted")
@@ -471,6 +496,304 @@ def currency_list_rates(ctx):
         )
 
     console.print(table)
+
+
+# ── Period Close Commands ──────────────────────────────────────
+
+@cli.group("period")
+def period():
+    """Manage accounting periods."""
+    pass
+
+
+@period.command("close")
+@click.option("--retained-earnings", "-r", default="retained_earnings",
+              help="Retained earnings account code")
+@click.option("--description", "-d", default=None,
+              help="Custom description for the closing entry")
+@click.pass_context
+@handle_error
+def period_close(ctx, retained_earnings, description):
+    """Close the current period (zero out temporary accounts)."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    result = close_period(
+        ledger,
+        retained_earnings_code=retained_earnings,
+        description=description,
+    )
+
+    console.print(f"[green]✓[/green] Period closed successfully!")
+    console.print(f"  Closing Entry ID: {result.closing_entry.id}")
+    console.print(f"  Revenue accounts closed: {len(result.revenue_accounts_closed)}")
+    console.print(f"  Expense accounts closed: {len(result.expense_accounts_closed)}")
+    console.print(f"  Net Income: {result.net_income:,.2f}")
+    console.print(f"  Retained Earnings → {result.retained_earnings_account}")
+    console.print(f"  Closed at: {result.closed_at.strftime('%Y-%m-%d %H:%M UTC')}")
+
+
+@period.command("list-closes")
+@click.pass_context
+@handle_error
+def period_list_closes(ctx):
+    """List all period close records."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    closes = ledger.get_closed_periods()
+
+    if not closes:
+        console.print("[yellow]No period closes recorded[/yellow]")
+        return
+
+    table = Table(title="Closed Periods")
+    table.add_column("Entry ID", style="cyan", max_width=8)
+    table.add_column("Closed At")
+    table.add_column("Net Income", justify="right", style="green")
+    table.add_column("Revenue Accounts", justify="right")
+    table.add_column("Expense Accounts", justify="right")
+
+    for c in closes:
+        table.add_row(
+            c.get("closing_entry_id", "")[:8],
+            c.get("closed_at", "")[:19],
+            f"{c.get('net_income', 0):,.2f}",
+            str(c.get("revenue_accounts_closed", 0)),
+            str(c.get("expense_accounts_closed", 0)),
+        )
+
+    console.print(table)
+
+
+# ── Hierarchy Commands ─────────────────────────────────────────
+
+@cli.group("hierarchy")
+def hierarchy():
+    """Manage account hierarchy."""
+    pass
+
+
+@hierarchy.command("tree")
+@click.option("--root", "-r", default=None, help="Root account code")
+@click.pass_context
+@handle_error
+def hierarchy_tree(ctx, root):
+    """Display account hierarchy tree."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    h = AccountHierarchy(ledger)
+    tree_str = h.format_tree(root_code=root)
+    console.print(tree_str)
+
+
+@hierarchy.command("rollup")
+@click.argument("account_code")
+@click.pass_context
+@handle_error
+def hierarchy_rollup(ctx, account_code):
+    """Show rolled-up balance for an account (including descendants)."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    h = AccountHierarchy(ledger)
+    own_balance = ledger.get_account_balance(account_code)
+    rollup_balance = h.get_rollup_balance(account_code)
+    account = ledger.get_account(account_code)
+
+    console.print(Panel(
+        f"[cyan]{account.code}[/cyan] - {account.name}\n"
+        f"Own Balance: {own_balance.balance:,.2f}\n"
+        f"Rollup Balance: {rollup_balance.balance:,.2f}\n"
+        f"Children: {len(h.get_children(account_code))}",
+        title="Account Rollup",
+    ))
+
+
+@hierarchy.command("validate")
+@click.pass_context
+@handle_error
+def hierarchy_validate(ctx):
+    """Validate the account hierarchy for issues."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    h = AccountHierarchy(ledger)
+    warnings = h.validate_hierarchy()
+
+    if not warnings:
+        console.print("[green]✓[/green] No hierarchy issues found")
+    else:
+        for w in warnings:
+            console.print(f"[yellow]⚠[/yellow] {w}")
+
+
+# ── Audit Log Commands ─────────────────────────────────────────
+
+@cli.group("audit")
+def audit():
+    """View audit log."""
+    pass
+
+
+@audit.command("list")
+@click.option("--action", "-a", default=None,
+              type=click.Choice([a.value for a in AuditAction]),
+              help="Filter by action type")
+@click.option("--actor", default=None, help="Filter by actor")
+@click.option("--limit", "-l", default=50, help="Maximum entries to show")
+@click.pass_context
+@handle_error
+def audit_list(ctx, action, actor, limit):
+    """View audit log entries."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    action_enum = AuditAction(action) if action else None
+    entries = ledger.audit.list_entries(action=action_enum, actor=actor, limit=limit)
+
+    if not entries:
+        console.print("[yellow]No audit entries found[/yellow]")
+        return
+
+    table = Table(title="Audit Log")
+    table.add_column("Time", style="cyan")
+    table.add_column("Action", style="magenta")
+    table.add_column("Actor", style="green")
+    table.add_column("Details", max_width=60)
+
+    for e in entries:
+        time_str = e.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+        details_str = ", ".join(f"{k}={v}" for k, v in list(e.details.items())[:3])
+        table.add_row(time_str, e.action.value, e.actor, details_str)
+
+    console.print(table)
+
+
+@audit.command("show")
+@click.argument("entry_id")
+@click.pass_context
+@handle_error
+def audit_show(ctx, entry_id):
+    """Show details of an audit entry."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    entry = ledger.audit.get_entry(entry_id)
+
+    before_str = ""
+    after_str = ""
+    if entry.before:
+        before_str = ", ".join(f"{k}={v}" for k, v in entry.before.items())
+    if entry.after:
+        after_str = ", ".join(f"{k}={v}" for k, v in entry.after.items())
+
+    console.print(Panel(
+        f"[cyan]ID:[/cyan] {entry.id}\n"
+        f"[cyan]Action:[/cyan] {entry.action.value}\n"
+        f"[cyan]Timestamp:[/cyan] {entry.timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+        f"[cyan]Actor:[/cyan] {entry.actor}\n"
+        f"[cyan]Details:[/cyan] {entry.details}\n"
+        f"[cyan]Before:[/cyan] {before_str or 'N/A'}\n"
+        f"[cyan]After:[/cyan] {after_str or 'N/A'}",
+        title="Audit Entry",
+    ))
+
+
+@audit.command("count")
+@click.pass_context
+@handle_error
+def audit_count(ctx):
+    """Show total audit entry count."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    console.print(f"Audit entries: {ledger.audit.count}")
+
+
+# ── Export Commands ─────────────────────────────────────────────
+
+@cli.group("export")
+def export():
+    """Export data to CSV."""
+    pass
+
+
+@export.command("accounts")
+@click.option("--output", "-o", default=None, help="Output file path (prints to stdout if not specified)")
+@click.pass_context
+@handle_error
+def export_accounts(ctx, output):
+    """Export chart of accounts to CSV."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    csv_content = export_accounts_csv(ledger)
+    if output:
+        write_csv_to_file(csv_content, output)
+        console.print(f"[green]✓[/green] Accounts exported to {output}")
+    else:
+        console.print(csv_content)
+
+
+@export.command("entries")
+@click.option("--account", "-a", default=None, help="Filter by account code")
+@click.option("--tag", "-t", default=None, help="Filter by tag")
+@click.option("--output", "-o", default=None, help="Output file path")
+@click.pass_context
+@handle_error
+def export_entries(ctx, account, tag, output):
+    """Export journal entries to CSV."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    csv_content = export_entries_csv(ledger, account_code=account, tag=tag)
+    if output:
+        write_csv_to_file(csv_content, output)
+        console.print(f"[green]✓[/green] Entries exported to {output}")
+    else:
+        console.print(csv_content)
+
+
+@export.command("trial-balance")
+@click.option("--output", "-o", default=None, help="Output file path")
+@click.pass_context
+@handle_error
+def export_trial_balance(ctx, output):
+    """Export trial balance to CSV."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    csv_content = export_trial_balance_csv(ledger)
+    if output:
+        write_csv_to_file(csv_content, output)
+        console.print(f"[green]✓[/green] Trial balance exported to {output}")
+    else:
+        console.print(csv_content)
+
+
+@export.command("income-statement")
+@click.option("--output", "-o", default=None, help="Output file path")
+@click.pass_context
+@handle_error
+def export_income_statement(ctx, output):
+    """Export income statement to CSV."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    csv_content = export_income_statement_csv(ledger)
+    if output:
+        write_csv_to_file(csv_content, output)
+        console.print(f"[green]✓[/green] Income statement exported to {output}")
+    else:
+        console.print(csv_content)
+
+
+@export.command("balance-sheet")
+@click.option("--output", "-o", default=None, help="Output file path")
+@click.pass_context
+@handle_error
+def export_balance_sheet(ctx, output):
+    """Export balance sheet to CSV."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    csv_content = export_balance_sheet_csv(ledger)
+    if output:
+        write_csv_to_file(csv_content, output)
+        console.print(f"[green]✓[/green] Balance sheet exported to {output}")
+    else:
+        console.print(csv_content)
+
+
+@export.command("hierarchy")
+@click.option("--output", "-o", default=None, help="Output file path")
+@click.pass_context
+@handle_error
+def export_hierarchy(ctx, output):
+    """Export account hierarchy with rollup balances to CSV."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    csv_content = export_hierarchy_csv(ledger)
+    if output:
+        write_csv_to_file(csv_content, output)
+        console.print(f"[green]✓[/green] Hierarchy exported to {output}")
+    else:
+        console.print(csv_content)
 
 
 # ── Serve Command (MCP) ─────────────────────────────────────────

@@ -207,6 +207,11 @@ class AccountBalance(BaseModel):
         return round(self.credit_total - self.debit_total, 2)
 
 
+class AuditLogData(BaseModel):
+    """Audit log data for persistence."""
+    entries: list[dict] = Field(default_factory=list, description="Audit log entries as dicts")
+
+
 class LedgerData(BaseModel):
     """Top-level data structure for persistence."""
     name: str = "Default Ledger"
@@ -214,5 +219,7 @@ class LedgerData(BaseModel):
     accounts: dict[str, Account] = Field(default_factory=dict)
     entries: list[JournalEntry] = Field(default_factory=list)
     exchange_rates: list[ExchangeRate] = Field(default_factory=list)
+    audit_log: AuditLogData = Field(default_factory=AuditLogData, description="Audit log entries")
+    closed_periods: list[dict] = Field(default_factory=list, description="List of closed period records")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

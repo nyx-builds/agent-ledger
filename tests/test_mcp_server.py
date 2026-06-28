@@ -43,8 +43,12 @@ class TestToolDefinitions:
             "post_entry", "list_entries", "get_entry", "delete_entry",
             "reconcile_entry", "trial_balance", "income_statement",
             "balance_sheet", "add_exchange_rate", "list_exchange_rates",
+            # v0.2.0 tools
+            "close_period", "get_account_hierarchy", "get_rollup_balance",
+            "validate_hierarchy", "list_audit_log", "export_csv",
+            "list_closed_periods",
         }
-        assert required.issubset(tool_names)
+        assert required.issubset(tool_names), f"Missing tools: {required - tool_names}"
 
 
 class TestHandleToolCall:
@@ -198,3 +202,98 @@ class TestHandleToolCall:
         result = handle_tool_call(populated_ledger, "delete_entry", {"entry_id": entry_id})
         data = json.loads(result[0]["text"])
         assert data["status"] == "deleted"
+
+
+class TestV2ToolHandling:
+    """Test v0.2.0 MCP tool handling."""
+
+    def test_close_period(self, populated_ledger):
+        # Post some activity
+        handle_tool_call(populated_ledger, "post_entry", {
+            "description": "Sale",
+            "lines": [
+                {"account_code": "cash", "debit": 1000},
+                {"account_code": "revenue", "credit": 1000},
+            ],
+        })
+        handle_tool_call(populated_ledger, "post_entry", {
+            "description": "Expense",
+            "lines": [
+                {"account_code": "expenses", "debit": 200},
+                {"account_code": "cash", "credit": 200},
+            ],
+        })
+
+        result = handle_tool_call(populated_ledger, "close_period", {})
+        import json
+        data = json.loads(result[0]["text"])
+        assert data["status"] == "closed"
+        assert data["net_income"] == 800.0
+
+    def test_get_account_hierarchy(self, populated_ledger):
+        result = handle_tool_call(populated_ledger, "get_account_hierarchy", {})
+        import json
+        data = json.loads(result[0]["text"])
+        assert isinstance(data, list)
+        # Should have root-level accounts
+        root_codes = [node["account"]["code"] for node in data]
+        assert "cash" in root_codes
+
+    def test_get_rollup_balance(self, populated_ledger):
+        # Create hierarchy
+        populated_ledger.create_account("bank", "Bank", AccountType.ASSET, parent_code="cash")
+        handle_tool_call(populated_ledger, "post_entry", {
+            "description": "Deposit",
+            "lines": [
+                {"account_code": "bank", "debit": 500},
+                {"account_code": "equity", "credit": 500},
+            ],
+        })
+
+        result = handle_tool_call(populated_ledger, "get_rollup_balance", {"code": "cash"})
+        import json
+        data = json.loads(result[0]["text"])
+        # Rollup should include bank's 500
+        assert data["credit_total"] == 0.0
+
+    def test_validate_hierarchy(self, populated_ledger):
+        result = handle_tool_call(populated_ledger, "validate_hierarchy", {})
+        import json
+        data = json.loads(result[0]["text"])
+        assert data["valid"] is True
+
+    def test_list_audit_log(self, populated_ledger):
+        # Create an account to generate audit entries
+        handle_tool_call(populated_ledger, "post_entry", {
+            "description": "Sale",
+            "lines": [
+                {"account_code": "cash", "debit": 100},
+                {"account_code": "revenue", "credit": 100},
+            ],
+        })
+
+        result = handle_tool_call(populated_ledger, "list_audit_log", {})
+        import json
+        data = json.loads(result[0]["text"])
+        assert isinstance(data, list)
+        assert len(data) > 0
+
+    def test_export_csv_accounts(self, populated_ledger):
+        result = handle_tool_call(populated_ledger, "export_csv", {"type": "accounts"})
+        import json
+        data = json.loads(result[0]["text"])
+        assert data["format"] == "csv"
+        assert "cash" in data["data"]
+
+    def test_export_csv_trial_balance(self, populated_ledger):
+        result = handle_tool_call(populated_ledger, "export_csv", {"type": "trial_balance"})
+        import json
+        data = json.loads(result[0]["text"])
+        assert data["format"] == "csv"
+
+    def test_list_closed_periods_empty(self, populated_ledger):
+        result = handle_tool_call(populated_ledger, "list_closed_periods", {})
+        import json
+        data = json.loads(result[0]["text"])
+        assert isinstance(data, list)
+        assert len(data) == 0
