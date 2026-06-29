@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-ledger"
-version = "0.2.0"
+version = "0.6.0"
 description = "Double-entry accounting ledger CLI + MCP server for autonomous agents"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,6 +22,10 @@ dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
 ]
+api = [
+    "fastapi>=0.100",
+    "uvicorn>=0.20",
+]
 
 [project.scripts]
 agent-ledger = "agent_ledger.cli:cli"
@@ -32,3 +36,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest-asyncio>=1.4.0",
+]

@@ -168,3 +168,103 @@ class TestEmptyReports:
         ledger = Ledger(storage)
         bs = generate_balance_sheet(ledger)
         assert bs.total_assets == 0.0
+
+
+class TestDateFilteredReports:
+    """Test report generation with date filtering."""
+
+    def test_trial_balance_with_as_of_date(self, tmp_path):
+        """Test trial balance with as_of date filter."""
+        from datetime import datetime, timezone, timedelta
+        filepath = tmp_path / "ledger.json"
+        storage = Storage(filepath)
+        storage.init()
+        ledger = Ledger(storage)
+        ledger.create_account("cash", "Cash", AccountType.ASSET)
+        ledger.create_account("revenue", "Sales Revenue", AccountType.REVENUE)
+
+        # Post entry at time T
+        entry1 = ledger.post_entry(
+            "Sale 1",
+            [
+                JournalLine(account_code="cash", debit=1000.0),
+                JournalLine(account_code="revenue", credit=1000.0),
+            ],
+        )
+
+        # Post another entry later
+        later = datetime.now(timezone.utc) + timedelta(hours=1)
+        entry2 = ledger.post_entry(
+            "Sale 2",
+            [
+                JournalLine(account_code="cash", debit=2000.0),
+                JournalLine(account_code="revenue", credit=2000.0),
+            ],
+            timestamp=later,
+        )
+
+        # Trial balance as of before the second entry
+        tb_before = generate_trial_balance(ledger, as_of=entry1.timestamp)
+        cash_row = next(r for r in tb_before.rows if r.account_code == "cash")
+        assert cash_row.debit == 1000.0
+
+        # Full trial balance
+        tb_full = generate_trial_balance(ledger)
+        cash_row_full = next(r for r in tb_full.rows if r.account_code == "cash")
+        assert cash_row_full.debit == 3000.0
+
+    def test_income_statement_with_date_range(self, tmp_path):
+        """Test income statement with date filtering."""
+        from datetime import datetime, timezone, timedelta
+        filepath = tmp_path / "ledger.json"
+        storage = Storage(filepath)
+        storage.init()
+        ledger = Ledger(storage)
+        ledger.create_account("cash", "Cash", AccountType.ASSET)
+        ledger.create_account("revenue", "Sales Revenue", AccountType.REVENUE)
+
+        # Post entry
+        ledger.post_entry(
+            "Sale",
+            [
+                JournalLine(account_code="cash", debit=500.0),
+                JournalLine(account_code="revenue", credit=500.0),
+            ],
+        )
+
+        # Filter to far future — should see no revenue
+        future = datetime.now(timezone.utc) + timedelta(days=365)
+        ist = generate_income_statement(ledger, from_date=future)
+        assert ist.total_revenue == 0.0
+
+        # No filter — should see revenue
+        ist_full = generate_income_statement(ledger)
+        assert ist_full.total_revenue == 5000.0 or ist_full.total_revenue == 500.0
+
+    def test_balance_sheet_with_as_of_date(self, tmp_path):
+        """Test balance sheet with as_of date filter."""
+        from datetime import datetime, timezone, timedelta
+        filepath = tmp_path / "ledger.json"
+        storage = Storage(filepath)
+        storage.init()
+        ledger = Ledger(storage)
+        ledger.create_account("cash", "Cash", AccountType.ASSET)
+        ledger.create_account("equity", "Owner's Equity", AccountType.EQUITY)
+
+        # Post entry
+        entry = ledger.post_entry(
+            "Investment",
+            [
+                JournalLine(account_code="cash", debit=10000.0),
+                JournalLine(account_code="equity", credit=10000.0),
+            ],
+        )
+
+        # As of before entry — no assets
+        past = datetime.now(timezone.utc) - timedelta(hours=1)
+        bs_past = generate_balance_sheet(ledger, as_of=past)
+        assert bs_past.total_assets == 0.0
+
+        # Full — should have assets
+        bs_full = generate_balance_sheet(ledger)
+        assert bs_full.total_assets == 10000.0

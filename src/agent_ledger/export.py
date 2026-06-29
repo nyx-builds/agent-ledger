@@ -258,3 +258,34 @@ def write_csv_to_file(csv_content: str, filepath: str) -> None:
     path = Path(filepath)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(csv_content, encoding="utf-8")
+
+
+def export_cash_flow_csv(ledger: Ledger) -> str:
+    """Export cash flow statement as CSV."""
+    from .cashflow import generate_cash_flow_statement
+    report = generate_cash_flow_statement(ledger)
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow(["section", "description", "amount"])
+
+    writer.writerow(["OPERATING", "", ""])
+    for item in report.operating.items:
+        writer.writerow(["operating", item.description, item.amount])
+    writer.writerow(["operating", "Net Cash from Operating", report.operating.total])
+
+    writer.writerow(["INVESTING", "", ""])
+    for item in report.investing.items:
+        writer.writerow(["investing", item.description, item.amount])
+    writer.writerow(["investing", "Net Cash from Investing", report.investing.total])
+
+    writer.writerow(["FINANCING", "", ""])
+    for item in report.financing.items:
+        writer.writerow(["financing", item.description, item.amount])
+    writer.writerow(["financing", "Net Cash from Financing", report.financing.total])
+
+    writer.writerow(["summary", "Net Change in Cash", report.net_change_in_cash])
+    writer.writerow(["summary", "Beginning Cash", report.beginning_cash])
+    writer.writerow(["summary", "Ending Cash", report.ending_cash])
+
+    return output.getvalue()

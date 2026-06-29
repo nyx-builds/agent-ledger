@@ -20,6 +20,7 @@ class AuditAction(str, Enum):
     ENTRY_DELETE = "entry_delete"
     ENTRY_RECONCILE = "entry_reconcile"
     ENTRY_UNRECONCILE = "entry_unreconcile"
+    ENTRY_REVERSE = "entry_reverse"
     PERIOD_CLOSE = "period_close"
     EXCHANGE_RATE_ADD = "exchange_rate_add"
     EXPORT = "export"

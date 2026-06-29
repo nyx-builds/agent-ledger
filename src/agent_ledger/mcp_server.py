@@ -30,6 +30,17 @@ def _ledger_to_dict(ledger: Ledger) -> dict:
     return json.loads(data.model_dump_json())
 
 
+def _parse_mcp_date(date_str: Optional[str]) -> Optional[Any]:
+    """Parse an ISO 8601 date string from MCP tool arguments."""
+    if date_str is None:
+        return None
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
 def _entry_to_dict(entry) -> dict:
     """Convert a journal entry to dict."""
     return json.loads(entry.model_dump_json())
@@ -190,7 +201,9 @@ TOOLS = [
         "description": "Generate a trial balance report",
         "inputSchema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "as_of": {"type": "string", "description": "As-of date (ISO 8601)", "default": None},
+            },
         },
     },
     {
@@ -198,7 +211,10 @@ TOOLS = [
         "description": "Generate an income statement (profit & loss)",
         "inputSchema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "from_date": {"type": "string", "description": "Start date (ISO 8601)", "default": None},
+                "to_date": {"type": "string", "description": "End date (ISO 8601)", "default": None},
+            },
         },
     },
     {
@@ -206,7 +222,9 @@ TOOLS = [
         "description": "Generate a balance sheet",
         "inputSchema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "as_of": {"type": "string", "description": "As-of date (ISO 8601)", "default": None},
+            },
         },
     },
     {
@@ -334,6 +352,511 @@ TOOLS = [
             "properties": {},
         },
     },
+    # ── v0.3.0 New Tools ────────────────────────────────────────
+    {
+        "name": "reverse_entry",
+        "description": "Reverse a journal entry by creating an opposing entry (debits become credits and vice versa)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "entry_id": {"type": "string", "description": "ID of the entry to reverse"},
+                "reason": {"type": "string", "description": "Reason for the reversal", "default": None},
+            },
+            "required": ["entry_id"],
+        },
+    },
+    {
+        "name": "cash_flow_statement",
+        "description": "Generate a cash flow statement (operating, investing, financing activities)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "apply_template",
+        "description": "Apply a chart of accounts template (solo, startup, freelancer) to quickly set up accounts",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "template": {
+                    "type": "string",
+                    "enum": ["solo", "startup", "freelancer"],
+                    "description": "Template to apply",
+                },
+            },
+            "required": ["template"],
+        },
+    },
+    {
+        "name": "list_templates",
+        "description": "List available chart of accounts templates",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "import_accounts_csv",
+        "description": "Import accounts from CSV content. Columns: code, name, type, currency, description, parent_code",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "csv_content": {"type": "string", "description": "CSV content with account data"},
+                "skip_errors": {"type": "boolean", "description": "Skip rows with errors", "default": False},
+            },
+            "required": ["csv_content"],
+        },
+    },
+    {
+        "name": "import_entries_csv",
+        "description": "Import journal entries from CSV content. Columns: entry_description, account_code, debit, credit, line_description. Lines with same entry_description are grouped.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "csv_content": {"type": "string", "description": "CSV content with entry data"},
+                "skip_errors": {"type": "boolean", "description": "Skip rows with errors", "default": False},
+            },
+            "required": ["csv_content"],
+        },
+    },
+    # ── v0.4.0 New Tools ────────────────────────────────────────
+    {
+        "name": "create_bank_statement",
+        "description": "Create a bank statement for reconciliation against ledger entries",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "account_code": {"type": "string", "description": "Account code to reconcile"},
+                "closing_balance": {"type": "number", "description": "Closing balance per bank statement"},
+                "opening_balance": {"type": "number", "description": "Opening balance per bank statement", "default": 0},
+                "statement_date": {"type": "string", "description": "Statement date (ISO 8601)", "default": None},
+                "currency": {"type": "string", "description": "Currency code", "default": "USD"},
+            },
+            "required": ["account_code", "closing_balance"],
+        },
+    },
+    {
+        "name": "add_bank_statement_line",
+        "description": "Add a line to a bank statement for reconciliation",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "statement_id": {"type": "string", "description": "Bank statement ID"},
+                "date": {"type": "string", "description": "Transaction date (ISO 8601)"},
+                "description": {"type": "string", "description": "Transaction description", "default": ""},
+                "amount": {"type": "number", "description": "Amount (positive=deposit, negative=withdrawal)"},
+                "reference": {"type": "string", "description": "Check/reference number", "default": ""},
+            },
+            "required": ["statement_id", "amount"],
+        },
+    },
+    {
+        "name": "add_bank_statement_lines_batch",
+        "description": "Add multiple lines to a bank statement. Lines: list of {date, description, amount, reference}.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "statement_id": {"type": "string", "description": "Bank statement ID"},
+                "lines": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "date": {"type": "string"},
+                            "description": {"type": "string"},
+                            "amount": {"type": "number"},
+                            "reference": {"type": "string"},
+                        },
+                        "required": ["amount"],
+                    },
+                    "description": "Statement lines",
+                },
+            },
+            "required": ["statement_id", "lines"],
+        },
+    },
+    {
+        "name": "list_bank_statements",
+        "description": "List bank statements with optional filters",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "account_code": {"type": "string", "description": "Filter by account code", "default": None},
+                "status": {"type": "string", "description": "Filter by status (open, in_progress, completed)", "default": None},
+            },
+        },
+    },
+    {
+        "name": "get_bank_statement",
+        "description": "Get details of a bank statement including all lines",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "statement_id": {"type": "string", "description": "Bank statement ID"},
+            },
+            "required": ["statement_id"],
+        },
+    },
+    {
+        "name": "match_bank_entry",
+        "description": "Manually match a bank statement line to a ledger journal entry",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "statement_id": {"type": "string", "description": "Bank statement ID"},
+                "line_id": {"type": "string", "description": "Statement line ID"},
+                "entry_id": {"type": "string", "description": "Journal entry ID to match"},
+            },
+            "required": ["statement_id", "line_id", "entry_id"],
+        },
+    },
+    {
+        "name": "unmatch_bank_entry",
+        "description": "Unmatch a previously matched bank statement line",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "statement_id": {"type": "string", "description": "Bank statement ID"},
+                "line_id": {"type": "string", "description": "Statement line ID"},
+            },
+            "required": ["statement_id", "line_id"],
+        },
+    },
+    {
+        "name": "auto_match_bank_entries",
+        "description": "Automatically match bank statement lines to ledger entries by amount",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "statement_id": {"type": "string", "description": "Bank statement ID"},
+                "tolerance": {"type": "number", "description": "Amount tolerance for matching", "default": 0.01},
+            },
+            "required": ["statement_id"],
+        },
+    },
+    {
+        "name": "reconcile_bank_statement",
+        "description": "Get reconciliation status for a bank statement (compare bank vs ledger balance)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "statement_id": {"type": "string", "description": "Bank statement ID"},
+            },
+            "required": ["statement_id"],
+        },
+    },
+    {
+        "name": "complete_bank_reconciliation",
+        "description": "Complete a bank reconciliation — marks matched entries as reconciled in the ledger",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "statement_id": {"type": "string", "description": "Bank statement ID"},
+            },
+            "required": ["statement_id"],
+        },
+    },
+    {
+        "name": "dispute_bank_line",
+        "description": "Mark a bank statement line as disputed",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "statement_id": {"type": "string", "description": "Bank statement ID"},
+                "line_id": {"type": "string", "description": "Statement line ID"},
+                "reason": {"type": "string", "description": "Reason for dispute", "default": None},
+            },
+            "required": ["statement_id", "line_id"],
+        },
+    },
+    {
+        "name": "get_unreconciled_entries",
+        "description": "Get ledger entries for an account that haven't been matched to any bank statement",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "account_code": {"type": "string", "description": "Account code"},
+            },
+            "required": ["account_code"],
+        },
+    },
+    {
+        "name": "delete_bank_statement",
+        "description": "Delete a bank statement",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "statement_id": {"type": "string", "description": "Bank statement ID"},
+            },
+            "required": ["statement_id"],
+        },
+    },
+    # ── v0.5.0 New Tools ────────────────────────────────────────
+    {
+        "name": "tax_summary",
+        "description": "Generate a tax summary report — classifies accounts into tax categories, computes taxable income and estimated tax",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "from_date": {"type": "string", "description": "Start date (ISO 8601)", "default": None},
+                "to_date": {"type": "string", "description": "End date (ISO 8601)", "default": None},
+                "tax_rate": {"type": "number", "description": "Tax rate for estimation (e.g., 0.21 for 21%)", "default": 0},
+            },
+        },
+    },
+    {
+        "name": "general_ledger",
+        "description": "Generate a General Ledger report — detailed journal with running balances, optionally filtered by account, date, or tag",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "account_code": {"type": "string", "description": "Filter by account code", "default": None},
+                "from_date": {"type": "string", "description": "Start date (ISO 8601)", "default": None},
+                "to_date": {"type": "string", "description": "End date (ISO 8601)", "default": None},
+                "tag": {"type": "string", "description": "Filter by tag", "default": None},
+            },
+        },
+    },
+    {
+        "name": "create_budget",
+        "description": "Create a budget with budgeted amounts per account for a fiscal period",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Budget name (e.g., 'Q1 2024 Budget')"},
+                "period_start": {"type": "string", "description": "Budget period start date (ISO 8601)", "default": None},
+                "period_end": {"type": "string", "description": "Budget period end date (ISO 8601)", "default": None},
+                "lines": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "account_code": {"type": "string"},
+                            "budgeted_amount": {"type": "number"},
+                        },
+                        "required": ["account_code", "budgeted_amount"],
+                    },
+                    "description": "Budget lines with account_code and budgeted_amount",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "list_budgets",
+        "description": "List all budgets with optional status filter",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["draft", "active", "closed"],
+                    "description": "Filter by budget status",
+                    "default": None,
+                },
+            },
+        },
+    },
+    {
+        "name": "get_budget",
+        "description": "Get details of a specific budget",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "budget_id": {"type": "string", "description": "Budget ID"},
+            },
+            "required": ["budget_id"],
+        },
+    },
+    {
+        "name": "add_budget_line",
+        "description": "Add or update a budget line (account code + budgeted amount)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "budget_id": {"type": "string", "description": "Budget ID"},
+                "account_code": {"type": "string", "description": "Account code"},
+                "budgeted_amount": {"type": "number", "description": "Budgeted amount"},
+            },
+            "required": ["budget_id", "account_code", "budgeted_amount"],
+        },
+    },
+    {
+        "name": "remove_budget_line",
+        "description": "Remove a budget line from a budget",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "budget_id": {"type": "string", "description": "Budget ID"},
+                "account_code": {"type": "string", "description": "Account code to remove"},
+            },
+            "required": ["budget_id", "account_code"],
+        },
+    },
+    {
+        "name": "activate_budget",
+        "description": "Activate a draft budget",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "budget_id": {"type": "string", "description": "Budget ID"},
+            },
+            "required": ["budget_id"],
+        },
+    },
+    {
+        "name": "close_budget",
+        "description": "Close an active budget",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "budget_id": {"type": "string", "description": "Budget ID"},
+            },
+            "required": ["budget_id"],
+        },
+    },
+    {
+        "name": "budget_variance_report",
+        "description": "Generate a budget variance report comparing budgeted vs actual amounts",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "budget_id": {"type": "string", "description": "Budget ID"},
+            },
+            "required": ["budget_id"],
+        },
+    },
+    {
+        "name": "create_fiscal_year",
+        "description": "Create a fiscal year with automatic period generation (monthly or quarterly)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Fiscal year name (e.g., 'FY 2024')"},
+                "start_date": {"type": "string", "description": "Start date (ISO 8601)"},
+                "end_date": {"type": "string", "description": "End date (ISO 8601)"},
+                "auto_periods": {"type": "boolean", "description": "Auto-generate periods", "default": True},
+                "period_type": {"type": "string", "enum": ["month", "quarter"], "description": "Period type", "default": "month"},
+            },
+            "required": ["name", "start_date", "end_date"],
+        },
+    },
+    {
+        "name": "list_fiscal_years",
+        "description": "List all fiscal years",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["open", "closed"],
+                    "description": "Filter by status",
+                    "default": None,
+                },
+            },
+        },
+    },
+    {
+        "name": "close_fiscal_year",
+        "description": "Close a fiscal year and all its periods",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "fy_id": {"type": "string", "description": "Fiscal year ID"},
+            },
+            "required": ["fy_id"],
+        },
+    },
+    {
+        "name": "get_active_fiscal_year",
+        "description": "Get the currently active fiscal year (the one containing today's date)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "delete_budget",
+        "description": "Delete a draft budget",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "budget_id": {"type": "string", "description": "Budget ID"},
+            },
+            "required": ["budget_id"],
+        },
+    },
+    # ── v0.6.0 New Tools ────────────────────────────────────────
+    {
+        "name": "search_entries",
+        "description": "Search journal entries by description text (case-insensitive). Optionally filter by account code or tag.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search string to match against entry descriptions"},
+                "account_code": {"type": "string", "description": "Optional filter by account code", "default": None},
+                "tag": {"type": "string", "description": "Optional filter by tag", "default": None},
+                "limit": {"type": "integer", "description": "Max entries to return", "default": 50},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "update_account",
+        "description": "Update an existing account's name, description, active status, or tags",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Account code"},
+                "name": {"type": "string", "description": "New account name", "default": None},
+                "description": {"type": "string", "description": "New description", "default": None},
+                "active": {"type": "boolean", "description": "Set active status", "default": None},
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "New tags (replaces existing)",
+                    "default": None,
+                },
+            },
+            "required": ["code"],
+        },
+    },
+    {
+        "name": "add_account_tag",
+        "description": "Add a tag to an account for filtering and grouping",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Account code"},
+                "tag": {"type": "string", "description": "Tag to add"},
+            },
+            "required": ["code", "tag"],
+        },
+    },
+    {
+        "name": "remove_account_tag",
+        "description": "Remove a tag from an account",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Account code"},
+                "tag": {"type": "string", "description": "Tag to remove"},
+            },
+            "required": ["code", "tag"],
+        },
+    },
+    {
+        "name": "list_accounts_by_tag",
+        "description": "List accounts that have a specific tag",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tag": {"type": "string", "description": "Tag to filter by"},
+            },
+            "required": ["tag"],
+        },
+    },
 ]
 
 
@@ -426,15 +949,19 @@ def _dispatch(ledger: Ledger, name: str, args: dict) -> Any:
         return {"status": "reconciled", "entry_id": entry.id}
 
     elif name == "trial_balance":
-        tb = generate_trial_balance(ledger)
+        as_of = _parse_mcp_date(args.get("as_of"))
+        tb = generate_trial_balance(ledger, as_of=as_of)
         return format_trial_balance(tb)
 
     elif name == "income_statement":
-        ist = generate_income_statement(ledger)
+        from_date = _parse_mcp_date(args.get("from_date"))
+        to_date = _parse_mcp_date(args.get("to_date"))
+        ist = generate_income_statement(ledger, from_date=from_date, to_date=to_date)
         return format_income_statement(ist)
 
     elif name == "balance_sheet":
-        bs = generate_balance_sheet(ledger)
+        as_of = _parse_mcp_date(args.get("as_of"))
+        bs = generate_balance_sheet(ledger, as_of=as_of)
         return format_balance_sheet(bs)
 
     elif name == "add_exchange_rate":
@@ -516,6 +1043,492 @@ def _dispatch(ledger: Ledger, name: str, args: dict) -> Any:
 
     elif name == "list_closed_periods":
         return ledger.get_closed_periods()
+
+    # ── v0.3.0 Tools ───────────────────────────────────────────
+
+    elif name == "reverse_entry":
+        reversal = ledger.reverse_entry(
+            entry_id=args["entry_id"],
+            reason=args.get("reason"),
+        )
+        return {
+            "status": "reversed",
+            "original_entry_id": args["entry_id"],
+            "reversal_entry_id": reversal.id,
+            "reversal_description": reversal.description,
+        }
+
+    elif name == "cash_flow_statement":
+        from .cashflow import generate_cash_flow_statement, format_cash_flow_statement
+        cf = generate_cash_flow_statement(ledger)
+        return format_cash_flow_statement(cf)
+
+    elif name == "apply_template":
+        from .templates import apply_template
+        created = apply_template(ledger, args["template"])
+        return {
+            "status": "applied",
+            "template": args["template"],
+            "accounts_created": len(created),
+            "account_codes": [a.code for a in created],
+        }
+
+    elif name == "list_templates":
+        from .templates import get_template_names
+        return get_template_names()
+
+    elif name == "import_accounts_csv":
+        from .import_csv import import_accounts_csv
+        result = import_accounts_csv(
+            ledger,
+            csv_content=args["csv_content"],
+            skip_errors=args.get("skip_errors", False),
+        )
+        return {
+            "imported": result.imported,
+            "skipped": result.skipped,
+            "errors": result.errors,
+        }
+
+    elif name == "import_entries_csv":
+        from .import_csv import import_entries_csv
+        result = import_entries_csv(
+            ledger,
+            csv_content=args["csv_content"],
+            skip_errors=args.get("skip_errors", False),
+        )
+        return {
+            "imported": result.imported,
+            "skipped": result.skipped,
+            "errors": result.errors,
+        }
+
+    # ── v0.4.0 Tools ───────────────────────────────────────────
+
+    elif name == "create_bank_statement":
+        from .reconciliation import BankReconciliation
+        recon_obj = BankReconciliation(ledger)
+        sd = _parse_mcp_date(args.get("statement_date"))
+        stmt = recon_obj.create_statement(
+            account_code=args["account_code"],
+            closing_balance=args["closing_balance"],
+            opening_balance=args.get("opening_balance", 0),
+            statement_date=sd,
+            currency=args.get("currency", "USD"),
+        )
+        return {
+            "statement_id": stmt.id,
+            "account_code": stmt.account_code,
+            "closing_balance": stmt.closing_balance,
+            "status": stmt.status,
+        }
+
+    elif name == "add_bank_statement_line":
+        from .reconciliation import BankReconciliation
+        recon_obj = BankReconciliation(ledger)
+        dt = _parse_mcp_date(args.get("date"))
+        line = recon_obj.add_statement_line(
+            statement_id=args["statement_id"],
+            date=dt,
+            description=args.get("description", ""),
+            amount=args["amount"],
+            reference=args.get("reference", ""),
+        )
+        return {"line_id": line.id, "amount": line.amount, "status": line.status}
+
+    elif name == "add_bank_statement_lines_batch":
+        from .reconciliation import BankReconciliation
+        recon_obj = BankReconciliation(ledger)
+        created = recon_obj.add_statement_lines_batch(
+            statement_id=args["statement_id"],
+            lines=args["lines"],
+        )
+        return {"created": len(created), "line_ids": [l.id for l in created]}
+
+    elif name == "list_bank_statements":
+        from .reconciliation import BankReconciliation
+        recon_obj = BankReconciliation(ledger)
+        statements = recon_obj.list_statements(
+            account_code=args.get("account_code"),
+            status=args.get("status"),
+        )
+        return [
+            {
+                "id": s.id,
+                "account_code": s.account_code,
+                "statement_date": s.statement_date.isoformat() if s.statement_date else None,
+                "opening_balance": s.opening_balance,
+                "closing_balance": s.closing_balance,
+                "lines": len(s.lines),
+                "status": s.status,
+            }
+            for s in statements
+        ]
+
+    elif name == "get_bank_statement":
+        from .reconciliation import BankReconciliation
+        recon_obj = BankReconciliation(ledger)
+        stmt = recon_obj.get_statement(args["statement_id"])
+        return {
+            "id": stmt.id,
+            "account_code": stmt.account_code,
+            "statement_date": stmt.statement_date.isoformat() if stmt.statement_date else None,
+            "opening_balance": stmt.opening_balance,
+            "closing_balance": stmt.closing_balance,
+            "currency": stmt.currency,
+            "status": stmt.status,
+            "lines": [
+                {
+                    "id": l.id,
+                    "date": l.date.isoformat() if l.date else None,
+                    "description": l.description,
+                    "amount": l.amount,
+                    "reference": l.reference,
+                    "matched_entry_id": l.matched_entry_id,
+                    "status": l.status,
+                }
+                for l in stmt.lines
+            ],
+        }
+
+    elif name == "match_bank_entry":
+        from .reconciliation import BankReconciliation
+        recon_obj = BankReconciliation(ledger)
+        line = recon_obj.match_entry(args["statement_id"], args["line_id"], args["entry_id"])
+        return {"status": "matched", "line_id": line.id, "matched_entry_id": line.matched_entry_id}
+
+    elif name == "unmatch_bank_entry":
+        from .reconciliation import BankReconciliation
+        recon_obj = BankReconciliation(ledger)
+        line = recon_obj.unmatch_entry(args["statement_id"], args["line_id"])
+        return {"status": "unmatched", "line_id": line.id}
+
+    elif name == "auto_match_bank_entries":
+        from .reconciliation import BankReconciliation
+        recon_obj = BankReconciliation(ledger)
+        result = recon_obj.auto_match(args["statement_id"], tolerance=args.get("tolerance", 0.01))
+        return result
+
+    elif name == "reconcile_bank_statement":
+        from .reconciliation import BankReconciliation
+        recon_obj = BankReconciliation(ledger)
+        result = recon_obj.reconcile(args["statement_id"])
+        return {
+            "statement_id": result.statement_id,
+            "total_statement_lines": result.total_statement_lines,
+            "matched": result.matched,
+            "unmatched_statement": result.unmatched_statement,
+            "disputed": result.disputed,
+            "statement_closing_balance": result.statement_closing_balance,
+            "ledger_balance": result.ledger_balance,
+            "difference": result.difference,
+            "is_balanced": result.is_balanced,
+        }
+
+    elif name == "complete_bank_reconciliation":
+        from .reconciliation import BankReconciliation
+        recon_obj = BankReconciliation(ledger)
+        result = recon_obj.complete_reconciliation(args["statement_id"])
+        return {
+            "status": "completed",
+            "matched": result.matched,
+            "difference": result.difference,
+            "is_balanced": result.is_balanced,
+        }
+
+    elif name == "dispute_bank_line":
+        from .reconciliation import BankReconciliation
+        recon_obj = BankReconciliation(ledger)
+        line = recon_obj.mark_disputed(args["statement_id"], args["line_id"], reason=args.get("reason"))
+        return {"status": "disputed", "line_id": line.id}
+
+    elif name == "get_unreconciled_entries":
+        from .reconciliation import BankReconciliation
+        recon_obj = BankReconciliation(ledger)
+        return recon_obj.get_unreconciled_entries(args["account_code"])
+
+    elif name == "delete_bank_statement":
+        from .reconciliation import BankReconciliation
+        recon_obj = BankReconciliation(ledger)
+        recon_obj.delete_statement(args["statement_id"])
+        return {"deleted": True, "statement_id": args["statement_id"]}
+
+    # ── v0.5.0 Tools ───────────────────────────────────────────
+
+    elif name == "tax_summary":
+        from .tax import generate_tax_summary, format_tax_summary
+        from_date = _parse_mcp_date(args.get("from_date"))
+        to_date = _parse_mcp_date(args.get("to_date"))
+        tax_rate = float(args.get("tax_rate", 0))
+        report = generate_tax_summary(
+            ledger,
+            from_date=from_date,
+            to_date=to_date,
+            tax_rate=tax_rate,
+        )
+        return format_tax_summary(report)
+
+    elif name == "general_ledger":
+        from .general_ledger import generate_general_ledger, format_general_ledger
+        from_date = _parse_mcp_date(args.get("from_date"))
+        to_date = _parse_mcp_date(args.get("to_date"))
+        report = generate_general_ledger(
+            ledger,
+            account_code=args.get("account_code"),
+            from_date=from_date,
+            to_date=to_date,
+            tag=args.get("tag"),
+        )
+        return format_general_ledger(report)
+
+    elif name == "create_budget":
+        from .budget import BudgetManager
+        bm = BudgetManager(ledger)
+        ps = _parse_mcp_date(args.get("period_start"))
+        pe = _parse_mcp_date(args.get("period_end"))
+        budget = bm.create_budget(
+            name=args["name"],
+            period_start=ps,
+            period_end=pe,
+            budget_lines=args.get("lines"),
+        )
+        return {
+            "id": budget.id,
+            "name": budget.name,
+            "status": budget.status,
+            "lines": len(budget.lines),
+            "total_budgeted": budget.total_budgeted,
+        }
+
+    elif name == "list_budgets":
+        from .budget import BudgetManager
+        bm = BudgetManager(ledger)
+        budgets = bm.list_budgets(status=args.get("status"))
+        return [
+            {
+                "id": b.id,
+                "name": b.name,
+                "status": b.status,
+                "lines": len(b.lines),
+                "total_budgeted": b.total_budgeted,
+                "total_actual": b.total_actual,
+                "total_variance": b.total_variance,
+            }
+            for b in budgets
+        ]
+
+    elif name == "get_budget":
+        from .budget import BudgetManager
+        bm = BudgetManager(ledger)
+        budget = bm.get_budget(args["budget_id"])
+        return {
+            "id": budget.id,
+            "name": budget.name,
+            "status": budget.status,
+            "period_start": budget.period_start.isoformat() if budget.period_start else None,
+            "period_end": budget.period_end.isoformat() if budget.period_end else None,
+            "lines": [
+                {
+                    "account_code": l.account_code,
+                    "budgeted_amount": l.budgeted_amount,
+                    "actual_amount": l.actual_amount,
+                    "variance": l.variance,
+                    "variance_pct": l.variance_pct,
+                }
+                for l in budget.lines
+            ],
+            "total_budgeted": budget.total_budgeted,
+            "total_actual": budget.total_actual,
+            "total_variance": budget.total_variance,
+        }
+
+    elif name == "add_budget_line":
+        from .budget import BudgetManager
+        bm = BudgetManager(ledger)
+        line = bm.add_budget_line(
+            budget_id=args["budget_id"],
+            account_code=args["account_code"],
+            budgeted_amount=args["budgeted_amount"],
+        )
+        return {
+            "account_code": line.account_code,
+            "budgeted_amount": line.budgeted_amount,
+            "status": "added",
+        }
+
+    elif name == "remove_budget_line":
+        from .budget import BudgetManager
+        bm = BudgetManager(ledger)
+        bm.remove_budget_line(
+            budget_id=args["budget_id"],
+            account_code=args["account_code"],
+        )
+        return {"status": "removed", "account_code": args["account_code"]}
+
+    elif name == "activate_budget":
+        from .budget import BudgetManager
+        bm = BudgetManager(ledger)
+        budget = bm.activate_budget(args["budget_id"])
+        return {"id": budget.id, "status": budget.status}
+
+    elif name == "close_budget":
+        from .budget import BudgetManager
+        bm = BudgetManager(ledger)
+        budget = bm.close_budget(args["budget_id"])
+        return {"id": budget.id, "status": budget.status}
+
+    elif name == "budget_variance_report":
+        from .budget import BudgetManager, format_variance_report
+        bm = BudgetManager(ledger)
+        report = bm.get_variance_report(args["budget_id"])
+        return format_variance_report(report)
+
+    elif name == "create_fiscal_year":
+        from .fiscal import FiscalYearManager
+        fm = FiscalYearManager(ledger)
+        start = _parse_mcp_date(args["start_date"])
+        end = _parse_mcp_date(args["end_date"])
+        if start is None or end is None:
+            return {"error": "start_date and end_date are required"}
+        fy = fm.create_fiscal_year(
+            name=args["name"],
+            start_date=start,
+            end_date=end,
+            auto_periods=args.get("auto_periods", True),
+            period_type=args.get("period_type", "month"),
+        )
+        return {
+            "id": fy.id,
+            "name": fy.name,
+            "status": fy.status,
+            "start_date": fy.start_date.isoformat(),
+            "end_date": fy.end_date.isoformat(),
+            "periods": [
+                {
+                    "name": p.name,
+                    "start_date": p.start_date.isoformat(),
+                    "end_date": p.end_date.isoformat(),
+                    "status": p.status,
+                    "period_type": p.period_type,
+                }
+                for p in fy.periods
+            ],
+        }
+
+    elif name == "list_fiscal_years":
+        from .fiscal import FiscalYearManager
+        fm = FiscalYearManager(ledger)
+        years = fm.list_fiscal_years(status=args.get("status"))
+        return [
+            {
+                "id": fy.id,
+                "name": fy.name,
+                "status": fy.status,
+                "start_date": fy.start_date.isoformat(),
+                "end_date": fy.end_date.isoformat(),
+                "periods": len(fy.periods),
+            }
+            for fy in years
+        ]
+
+    elif name == "close_fiscal_year":
+        from .fiscal import FiscalYearManager
+        fm = FiscalYearManager(ledger)
+        fy = fm.close_fiscal_year(args["fy_id"])
+        return {"id": fy.id, "name": fy.name, "status": fy.status}
+
+    elif name == "get_active_fiscal_year":
+        from .fiscal import FiscalYearManager
+        fm = FiscalYearManager(ledger)
+        fy = fm.get_active_fiscal_year()
+        if fy is None:
+            return {"active_fiscal_year": None}
+        return {
+            "id": fy.id,
+            "name": fy.name,
+            "status": fy.status,
+            "start_date": fy.start_date.isoformat(),
+            "end_date": fy.end_date.isoformat(),
+            "periods": len(fy.periods),
+        }
+
+    elif name == "delete_budget":
+        from .budget import BudgetManager
+        bm = BudgetManager(ledger)
+        bm.delete_budget(args["budget_id"])
+        return {"deleted": True, "budget_id": args["budget_id"]}
+
+    # ── v0.6.0 Tools ────────────────────────────────────────────
+    elif name == "search_entries":
+        results = ledger.search_entries(
+            query=args["query"],
+            account_code=args.get("account_code"),
+            tag=args.get("tag"),
+            limit=args.get("limit", 50),
+        )
+        return [
+            {
+                "id": e.id,
+                "description": e.description,
+                "timestamp": e.timestamp.isoformat(),
+                "tags": e.tags,
+                "reconciled": e.reconciled,
+                "total_debit": round(sum(l.debit for l in e.lines), 2),
+                "total_credit": round(sum(l.credit for l in e.lines), 2),
+            }
+            for e in results
+        ]
+
+    elif name == "update_account":
+        account = ledger.update_account(
+            code=args["code"],
+            name=args.get("name"),
+            description=args.get("description"),
+            active=args.get("active"),
+            tags=args.get("tags"),
+        )
+        return {
+            "code": account.code,
+            "name": account.name,
+            "description": account.description,
+            "active": account.active,
+            "tags": account.tags,
+        }
+
+    elif name == "add_account_tag":
+        account = ledger.get_account(args["code"])
+        if args["tag"] not in account.tags:
+            account.tags.append(args["tag"])
+            ledger.save()
+        return {
+            "code": account.code,
+            "name": account.name,
+            "tags": account.tags,
+        }
+
+    elif name == "remove_account_tag":
+        account = ledger.get_account(args["code"])
+        if args["tag"] in account.tags:
+            account.tags.remove(args["tag"])
+            ledger.save()
+        return {
+            "code": account.code,
+            "name": account.name,
+            "tags": account.tags,
+        }
+
+    elif name == "list_accounts_by_tag":
+        accounts = ledger.list_accounts(tag=args["tag"])
+        return [
+            {
+                "code": a.code,
+                "name": a.name,
+                "account_type": a.account_type.value,
+                "active": a.active,
+                "tags": a.tags,
+            }
+            for a in accounts
+        ]
 
     else:
         raise LedgerError(f"Unknown tool: {name}")

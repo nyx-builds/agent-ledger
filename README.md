@@ -9,11 +9,15 @@ Create and manage a chart of accounts, post journal entries with full double-ent
 - **Chart of Accounts** — Asset, Liability, Equity, Revenue, Expense account types
 - **Double-Entry Validation** — Every journal entry must balance (debits = credits)
 - **Journal Entries** — Multi-line entries with descriptions, timestamps, and tags
-- **Financial Reports** — Trial Balance, Income Statement, Balance Sheet
-- **Multi-Currency** — Accounts in different currencies with exchange rates
+- **Financial Reports** — Trial Balance, Income Statement, Balance Sheet, Cash Flow Statement
+- **Date-Filtered Reports** — Generate reports as of a specific date or for a date range
+- **Multi-Currency** — Accounts in different currencies with exchange rates and conversion
 - **Reconciliation** — Mark entries as reconciled, track reconciliation status
+- **Entry Reversal** — Reverse any posted entry with an opposing entry
 - **Period Close** — Close accounting periods, zero out temporary accounts into retained earnings
 - **Account Hierarchy** — Parent-child account relationships with rollup balances
+- **Chart of Accounts Templates** — Pre-built templates for Solo, Startup, and Freelancer businesses
+- **CSV Import** — Import accounts and journal entries from CSV files
 - **Audit Log** — Track all ledger operations with timestamps and actor attribution
 - **CSV Export** — Export accounts, entries, and reports to CSV files
 - **Data Persistence** — JSON-based storage, portable and human-readable
@@ -51,6 +55,9 @@ agent-ledger entry post "Purchase supplies" \
   expenses:500 \
   cash:500
 
+# Reverse an entry (creates opposing entry)
+agent-ledger entry reverse <entry-id> --reason "Posted in error"
+
 # View trial balance
 agent-ledger report trial-balance
 
@@ -59,6 +66,9 @@ agent-ledger report income-statement
 
 # View balance sheet
 agent-ledger report balance-sheet
+
+# View cash flow statement
+agent-ledger report cash-flow
 
 # List accounts
 agent-ledger account list
@@ -82,6 +92,14 @@ agent-ledger export accounts --output accounts.csv
 agent-ledger export entries --output entries.csv
 agent-ledger export trial-balance --output tb.csv
 agent-ledger export income-statement --output is.csv
+
+# Apply a chart of accounts template
+agent-ledger template list
+agent-ledger template apply solo
+
+# Import from CSV
+agent-ledger import accounts accounts.csv
+agent-ledger import entries entries.csv
 ```
 
 ### MCP Server
@@ -92,9 +110,10 @@ agent-ledger serve
 
 This starts an MCP server that exposes all ledger operations as tools for autonomous agents, including:
 - **Core**: `init_ledger`, `create_account`, `list_accounts`, `get_account`, `post_entry`, `list_entries`, `get_entry`, `delete_entry`, `reconcile_entry`
-- **Reports**: `trial_balance`, `income_statement`, `balance_sheet`
+- **Reports**: `trial_balance`, `income_statement`, `balance_sheet`, `cash_flow_statement`
 - **Multi-Currency**: `add_exchange_rate`, `list_exchange_rates`
 - **v0.2.0**: `close_period`, `get_account_hierarchy`, `get_rollup_balance`, `validate_hierarchy`, `list_audit_log`, `export_csv`, `list_closed_periods`
+- **v0.3.0**: `reverse_entry`, `apply_template`, `list_templates`, `import_accounts_csv`, `import_entries_csv`
 
 ## Architecture
 
@@ -110,6 +129,9 @@ src/agent_ledger/
 ├── closing.py         # Period close (zero temporary accounts)
 ├── hierarchy.py       # Account hierarchy & rollup balances
 ├── export.py          # CSV export for accounts, entries, reports
+├── cashflow.py       # Cash flow statement generation (indirect method)
+├── templates.py      # Chart of accounts templates (solo, startup, freelancer)
+├── import_csv.py     # CSV import for accounts and journal entries
 ├── cli.py             # Click CLI
 ├── mcp_server.py      # MCP server for agent integration
 └── exceptions.py      # Custom exceptions

@@ -69,3 +69,18 @@ class PeriodCloseError(LedgerError):
 class AccountHasChildrenError(LedgerError):
     """Account has child accounts and cannot be deleted."""
     pass
+
+
+class BankStatementNotFoundError(LedgerError):
+    """Bank statement not found."""
+    pass
+
+
+class ReconciliationItemNotFoundError(LedgerError):
+    """Reconciliation item not found."""
+    pass
+
+
+class InvalidReconciliationStateError(LedgerError):
+    """Invalid state transition for reconciliation."""
+    pass

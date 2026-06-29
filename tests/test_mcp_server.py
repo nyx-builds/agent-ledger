@@ -297,3 +297,94 @@ class TestV2ToolHandling:
         data = json.loads(result[0]["text"])
         assert isinstance(data, list)
         assert len(data) == 0
+
+
+class TestV3ToolHandling:
+    """Test v0.3.0 MCP tool handling."""
+
+    def test_reverse_entry(self, populated_ledger):
+        # Post an entry first
+        entry_result = handle_tool_call(populated_ledger, "post_entry", {
+            "description": "Sale",
+            "lines": [
+                {"account_code": "cash", "debit": 500},
+                {"account_code": "revenue", "credit": 500},
+            ],
+        })
+        import json
+        entry_data = json.loads(entry_result[0]["text"])
+        entry_id = entry_data["id"]
+
+        # Reverse it
+        result = handle_tool_call(populated_ledger, "reverse_entry", {
+            "entry_id": entry_id,
+            "reason": "Posted in error",
+        })
+        data = json.loads(result[0]["text"])
+        assert data["status"] == "reversed"
+        assert data["original_entry_id"] == entry_id
+        assert data["reversal_entry_id"] != entry_id
+
+    def test_cash_flow_statement(self, populated_ledger):
+        # Post an entry
+        handle_tool_call(populated_ledger, "post_entry", {
+            "description": "Sale",
+            "lines": [
+                {"account_code": "cash", "debit": 1000},
+                {"account_code": "revenue", "credit": 1000},
+            ],
+        })
+        result = handle_tool_call(populated_ledger, "cash_flow_statement", {})
+        assert "CASH FLOW STATEMENT" in result[0]["text"]
+
+    def test_apply_template(self, tmp_path):
+        filepath = tmp_path / "ledger.json"
+        storage = Storage(filepath)
+        storage.init()
+        ledger = Ledger(storage)
+
+        result = handle_tool_call(ledger, "apply_template", {"template": "solo"})
+        import json
+        data = json.loads(result[0]["text"])
+        assert data["status"] == "applied"
+        assert data["accounts_created"] > 0
+
+    def test_list_templates(self, ledger):
+        result = handle_tool_call(ledger, "list_templates", {})
+        import json
+        data = json.loads(result[0]["text"])
+        assert isinstance(data, list)
+        assert len(data) == 3
+        keys = [t["key"] for t in data]
+        assert "solo" in keys
+
+    def test_import_accounts_csv(self, ledger):
+        csv_content = "code,name,type\ncash,Cash,asset\nap,Accounts Payable,liability\n"
+        result = handle_tool_call(ledger, "import_accounts_csv", {
+            "csv_content": csv_content,
+        })
+        import json
+        data = json.loads(result[0]["text"])
+        assert data["imported"] == 2
+
+    def test_import_entries_csv(self, populated_ledger):
+        csv_content = (
+            "entry_description,account_code,debit,credit\n"
+            "Sale,cash,500,0\n"
+            "Sale,revenue,0,500\n"
+        )
+        result = handle_tool_call(populated_ledger, "import_entries_csv", {
+            "csv_content": csv_content,
+        })
+        import json
+        data = json.loads(result[0]["text"])
+        assert data["imported"] == 1
+
+    def test_v3_tools_in_definitions(self):
+        tool_names = {t["name"] for t in TOOLS}
+        v3_tools = {
+            "reverse_entry", "cash_flow_statement",
+            "apply_template", "list_templates",
+            "import_accounts_csv", "import_entries_csv",
+        }
+        assert v3_tools.issubset(tool_names), f"Missing: {v3_tools - tool_names}"

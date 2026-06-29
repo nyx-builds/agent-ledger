@@ -1,12 +1,25 @@
-"""JSON-based persistence layer for agent-ledger."""
+"""Persistence layer for agent-ledger — auto-detects SQLite (.db) or JSON storage."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from .models import LedgerData
+
+
+def create_storage(filepath: Optional[Path] = None) -> Union["Storage", "SQLiteStorage"]:
+    """Create the appropriate storage backend based on file extension.
+
+    .db files → SQLiteStorage (fast, concurrent, scalable)
+    .json files or no extension → Storage (JSON, human-readable, portable)
+    """
+    fp = filepath or Path("ledger.json")
+    if str(fp).endswith(".db"):
+        from .sqlite_storage import SQLiteStorage
+        return SQLiteStorage(fp)
+    from .storage import Storage
+    return Storage(fp)
 
 
 class Storage:
@@ -21,6 +34,8 @@ class Storage:
 
     def load(self) -> LedgerData:
         """Load ledger data from JSON file."""
+        import json
+
         if not self.filepath.exists():
             from .exceptions import LedgerNotInitializedError
             raise LedgerNotInitializedError(
@@ -32,7 +47,9 @@ class Storage:
 
     def save(self, data: LedgerData) -> None:
         """Save ledger data to JSON file."""
+        import json
         from datetime import datetime, timezone
+
         data.updated_at = datetime.now(timezone.utc)
 
         # Ensure directory exists

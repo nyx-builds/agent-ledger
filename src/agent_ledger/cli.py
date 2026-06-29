@@ -34,6 +34,17 @@ console = Console()
 DEFAULT_LEDGER_PATH = Path.cwd() / "ledger.json"
 
 
+def _parse_cli_date(date_str: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO 8601 date string from CLI input."""
+    if date_str is None:
+        return None
+    try:
+        return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        console.print(f"[red]Invalid date format:[/red] {date_str}. Use ISO 8601 (e.g. 2024-01-31)")
+        sys.exit(1)
+
+
 def get_ledger(path: Optional[Path] = None) -> Ledger:
     """Get a Ledger instance from the given path."""
     filepath = path or DEFAULT_LEDGER_PATH
@@ -392,6 +403,21 @@ def entry_unreconcile(ctx, entry_id):
     console.print(f"[green]✓[/green] Entry '{entry_id}' unreconciled")
 
 
+@entry.command("reverse")
+@click.argument("entry_id")
+@click.option("--reason", "-r", default=None, help="Reason for reversal")
+@click.pass_context
+@handle_error
+def entry_reverse(ctx, entry_id, reason):
+    """Reverse a journal entry (creates an opposing entry)."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    reversal = ledger.reverse_entry(entry_id, reason=reason)
+    console.print(f"[green]✓[/green] Entry reversed")
+    console.print(f"  Original: {entry_id}")
+    console.print(f"  Reversal: {reversal.id}")
+    console.print(f"  Description: {reversal.description}")
+
+
 # ── Report Commands ─────────────────────────────────────────────
 
 @cli.group("report")
@@ -401,33 +427,52 @@ def report():
 
 
 @report.command("trial-balance")
+@click.option("--as-of", "-a", default=None, help="As-of date (ISO 8601, e.g. 2024-01-31)")
 @click.pass_context
 @handle_error
-def report_trial_balance(ctx):
+def report_trial_balance(ctx, as_of):
     """Generate a trial balance."""
     ledger = get_ledger(ctx.obj["ledger_file"])
-    tb = generate_trial_balance(ledger)
+    as_of_dt = _parse_cli_date(as_of)
+    tb = generate_trial_balance(ledger, as_of=as_of_dt)
     console.print(format_trial_balance(tb))
 
 
 @report.command("income-statement")
+@click.option("--from-date", "-f", default=None, help="Start date (ISO 8601)")
+@click.option("--to-date", "-t", default=None, help="End date (ISO 8601)")
 @click.pass_context
 @handle_error
-def report_income_statement(ctx):
+def report_income_statement(ctx, from_date, to_date):
     """Generate an income statement."""
     ledger = get_ledger(ctx.obj["ledger_file"])
-    ist = generate_income_statement(ledger)
+    fd = _parse_cli_date(from_date)
+    td = _parse_cli_date(to_date)
+    ist = generate_income_statement(ledger, from_date=fd, to_date=td)
     console.print(format_income_statement(ist))
 
 
 @report.command("balance-sheet")
+@click.option("--as-of", "-a", default=None, help="As-of date (ISO 8601)")
 @click.pass_context
 @handle_error
-def report_balance_sheet(ctx):
+def report_balance_sheet(ctx, as_of):
     """Generate a balance sheet."""
     ledger = get_ledger(ctx.obj["ledger_file"])
-    bs = generate_balance_sheet(ledger)
+    as_of_dt = _parse_cli_date(as_of)
+    bs = generate_balance_sheet(ledger, as_of=as_of_dt)
     console.print(format_balance_sheet(bs))
+
+
+@report.command("cash-flow")
+@click.pass_context
+@handle_error
+def report_cash_flow(ctx):
+    """Generate a cash flow statement."""
+    from .cashflow import generate_cash_flow_statement, format_cash_flow_statement
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    cf = generate_cash_flow_statement(ledger)
+    console.print(format_cash_flow_statement(cf))
 
 
 # ── Currency Commands ───────────────────────────────────────────
@@ -794,6 +839,839 @@ def export_hierarchy(ctx, output):
         console.print(f"[green]✓[/green] Hierarchy exported to {output}")
     else:
         console.print(csv_content)
+
+
+# ── Template Commands ─────────────────────────────────────────
+
+@cli.group("template")
+def template():
+    """Manage chart of accounts templates."""
+    pass
+
+
+@template.command("list")
+@click.pass_context
+@handle_error
+def template_list(ctx):
+    """List available chart of accounts templates."""
+    from .templates import get_template_names
+    templates = get_template_names()
+
+    table = Table(title="Account Templates")
+    table.add_column("Key", style="cyan")
+    table.add_column("Name")
+    table.add_column("Accounts", justify="right", style="green")
+
+    for t in templates:
+        table.add_row(t["key"], t["name"], str(t["account_count"]))
+
+    console.print(table)
+
+
+@template.command("apply")
+@click.argument("template_key", type=click.Choice(["solo", "startup", "freelancer"]))
+@click.pass_context
+@handle_error
+def template_apply(ctx, template_key):
+    """Apply a chart of accounts template."""
+    from .templates import apply_template
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    created = apply_template(ledger, template_key)
+    console.print(f"[green]✓[/green] Applied '{template_key}' template: {len(created)} accounts created")
+
+
+# ── Import Commands ───────────────────────────────────────────
+
+@cli.group("import")
+def import_group():
+    """Import data from CSV."""
+    pass
+
+
+@import_group.command("accounts")
+@click.argument("csv_file", type=click.Path(exists=True))
+@click.option("--skip-errors", is_flag=True, help="Skip rows with errors")
+@click.pass_context
+@handle_error
+def import_accounts(ctx, csv_file, skip_errors):
+    """Import accounts from a CSV file."""
+    from .import_csv import import_accounts_csv
+    from pathlib import Path
+
+    csv_content = Path(csv_file).read_text(encoding="utf-8")
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    result = import_accounts_csv(ledger, csv_content, skip_errors=skip_errors)
+
+    console.print(f"[green]✓[/green] Imported {result.imported} accounts")
+    if result.skipped:
+        console.print(f"  [yellow]Skipped: {result.skipped}[/yellow]")
+    if result.errors:
+        for err in result.errors:
+            console.print(f"  [red]Error: {err}[/red]")
+
+
+@import_group.command("entries")
+@click.argument("csv_file", type=click.Path(exists=True))
+@click.option("--skip-errors", is_flag=True, help="Skip rows with errors")
+@click.pass_context
+@handle_error
+def import_entries(ctx, csv_file, skip_errors):
+    """Import journal entries from a CSV file."""
+    from .import_csv import import_entries_csv
+    from pathlib import Path
+
+    csv_content = Path(csv_file).read_text(encoding="utf-8")
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    result = import_entries_csv(ledger, csv_content, skip_errors=skip_errors)
+
+    console.print(f"[green]✓[/green] Imported {result.imported} entries")
+    if result.skipped:
+        console.print(f"  [yellow]Skipped: {result.skipped}[/yellow]")
+    if result.errors:
+        for err in result.errors:
+            console.print(f"  [red]Error: {err}[/red]")
+
+
+# ── Reconciliation Commands ────────────────────────────────────
+
+@cli.group("recon")
+def recon():
+    """Bank reconciliation management."""
+    pass
+
+
+@recon.command("create-statement")
+@click.argument("account_code")
+@click.option("--statement-date", "-d", default=None, help="Statement date (ISO 8601)")
+@click.option("--opening-balance", "-o", type=float, default=0.0, help="Opening balance per bank")
+@click.option("--closing-balance", "-c", type=float, required=True, help="Closing balance per bank")
+@click.option("--currency", default="USD", help="Currency code")
+@click.pass_context
+@handle_error
+def recon_create_statement(ctx, account_code, statement_date, opening_balance, closing_balance, currency):
+    """Create a bank statement for reconciliation."""
+    from .reconciliation import BankReconciliation
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    recon_obj = BankReconciliation(ledger)
+    sd = _parse_cli_date(statement_date)
+    stmt = recon_obj.create_statement(
+        account_code=account_code,
+        statement_date=sd,
+        opening_balance=opening_balance,
+        closing_balance=closing_balance,
+        currency=currency,
+    )
+    console.print(f"[green]✓[/green] Bank statement created: {stmt.id}")
+    console.print(f"  Account: {account_code}")
+    console.print(f"  Closing Balance: {closing_balance:,.2f}")
+
+
+@recon.command("add-line")
+@click.argument("statement_id")
+@click.option("--date", "-d", default=None, help="Transaction date (ISO 8601)")
+@click.option("--description", "-n", default="", help="Transaction description")
+@click.option("--amount", "-a", type=float, required=True, help="Amount (positive=deposit, negative=withdrawal)")
+@click.option("--reference", "-r", default="", help="Check/reference number")
+@click.pass_context
+@handle_error
+def recon_add_line(ctx, statement_id, date, description, amount, reference):
+    """Add a line to a bank statement."""
+    from .reconciliation import BankReconciliation
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    recon_obj = BankReconciliation(ledger)
+    dt = _parse_cli_date(date)
+    line = recon_obj.add_statement_line(
+        statement_id=statement_id,
+        date=dt,
+        description=description,
+        amount=amount,
+        reference=reference,
+    )
+    console.print(f"[green]✓[/green] Line added: {line.id}")
+    console.print(f"  Description: {description or 'N/A'}")
+    console.print(f"  Amount: {amount:,.2f}")
+
+
+@recon.command("import-lines")
+@click.argument("statement_id")
+@click.argument("csv_file", type=click.Path(exists=True))
+@click.option("--skip-errors", is_flag=True, help="Skip rows with errors")
+@click.pass_context
+@handle_error
+def recon_import_lines(ctx, statement_id, csv_file, skip_errors):
+    """Import bank statement lines from CSV. Columns: date, description, amount, reference."""
+    import csv
+    from .reconciliation import BankReconciliation
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    recon_obj = BankReconciliation(ledger)
+    
+    lines_data = []
+    with open(csv_file, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            lines_data.append({
+                "date": row.get("date", ""),
+                "description": row.get("description", ""),
+                "amount": float(row.get("amount", 0)),
+                "reference": row.get("reference", ""),
+            })
+    
+    created = recon_obj.add_statement_lines_batch(statement_id, lines_data)
+    console.print(f"[green]✓[/green] Imported {len(created)} lines to statement {statement_id}")
+
+
+@recon.command("list-statements")
+@click.option("--account", "-a", default=None, help="Filter by account code")
+@click.option("--status", "-s", default=None, help="Filter by status (open, in_progress, completed)")
+@click.pass_context
+@handle_error
+def recon_list_statements(ctx, account, status):
+    """List bank statements."""
+    from .reconciliation import BankReconciliation
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    recon_obj = BankReconciliation(ledger)
+    statements = recon_obj.list_statements(account_code=account, status=status)
+    
+    if not statements:
+        console.print("[yellow]No bank statements found[/yellow]")
+        return
+    
+    table = Table(title="Bank Statements")
+    table.add_column("ID", style="cyan", max_width=8)
+    table.add_column("Account")
+    table.add_column("Date")
+    table.add_column("Opening", justify="right")
+    table.add_column("Closing", justify="right")
+    table.add_column("Lines", justify="right")
+    table.add_column("Status")
+    
+    for s in statements:
+        date_str = s.statement_date.strftime("%Y-%m-%d") if s.statement_date else "N/A"
+        table.add_row(
+            s.id[:8],
+            s.account_code,
+            date_str,
+            f"{s.opening_balance:,.2f}",
+            f"{s.closing_balance:,.2f}",
+            str(len(s.lines)),
+            s.status,
+        )
+    
+    console.print(table)
+
+
+@recon.command("show-statement")
+@click.argument("statement_id")
+@click.pass_context
+@handle_error
+def recon_show_statement(ctx, statement_id):
+    """Show details of a bank statement with all lines."""
+    from .reconciliation import BankReconciliation
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    recon_obj = BankReconciliation(ledger)
+    stmt = recon_obj.get_statement(statement_id)
+    
+    date_str = stmt.statement_date.strftime("%Y-%m-%d") if stmt.statement_date else "N/A"
+    console.print(Panel(
+        f"[cyan]ID:[/cyan] {stmt.id}\n"
+        f"[cyan]Account:[/cyan] {stmt.account_code}\n"
+        f"[cyan]Date:[/cyan] {date_str}\n"
+        f"[cyan]Opening:[/cyan] {stmt.opening_balance:,.2f}\n"
+        f"[cyan]Closing:[/cyan] {stmt.closing_balance:,.2f}\n"
+        f"[cyan]Status:[/cyan] {stmt.status}",
+        title="Bank Statement",
+    ))
+    
+    if stmt.lines:
+        table = Table(title="Statement Lines")
+        table.add_column("ID", style="cyan", max_width=8)
+        table.add_column("Date")
+        table.add_column("Description")
+        table.add_column("Amount", justify="right")
+        table.add_column("Reference")
+        table.add_column("Status")
+        table.add_column("Matched Entry", max_width=8)
+        
+        for line in stmt.lines:
+            line_date = line.date.strftime("%Y-%m-%d") if line.date else ""
+            table.add_row(
+                line.id[:8],
+                line_date,
+                line.description[:30],
+                f"{line.amount:,.2f}",
+                line.reference,
+                line.status,
+                line.matched_entry_id[:8] if line.matched_entry_id else "",
+            )
+        
+        console.print(table)
+
+
+@recon.command("match")
+@click.argument("statement_id")
+@click.argument("line_id")
+@click.argument("entry_id")
+@click.pass_context
+@handle_error
+def recon_match(ctx, statement_id, line_id, entry_id):
+    """Manually match a statement line to a ledger entry."""
+    from .reconciliation import BankReconciliation
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    recon_obj = BankReconciliation(ledger)
+    line = recon_obj.match_entry(statement_id, line_id, entry_id)
+    console.print(f"[green]✓[/green] Matched line {line_id[:8]} to entry {entry_id[:8]}")
+
+
+@recon.command("unmatch")
+@click.argument("statement_id")
+@click.argument("line_id")
+@click.pass_context
+@handle_error
+def recon_unmatch(ctx, statement_id, line_id):
+    """Unmatch a previously matched statement line."""
+    from .reconciliation import BankReconciliation
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    recon_obj = BankReconciliation(ledger)
+    line = recon_obj.unmatch_entry(statement_id, line_id)
+    console.print(f"[green]✓[/green] Unmatched line {line_id[:8]}")
+
+
+@recon.command("auto-match")
+@click.argument("statement_id")
+@click.option("--tolerance", "-t", type=float, default=0.01, help="Amount tolerance for matching")
+@click.pass_context
+@handle_error
+def recon_auto_match(ctx, statement_id, tolerance):
+    """Auto-match statement lines to ledger entries by amount."""
+    from .reconciliation import BankReconciliation
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    recon_obj = BankReconciliation(ledger)
+    result = recon_obj.auto_match(statement_id, tolerance=tolerance)
+    console.print(f"[green]✓[/green] Auto-matched {result['matched']} lines")
+
+
+@recon.command("status")
+@click.argument("statement_id")
+@click.pass_context
+@handle_error
+def recon_status(ctx, statement_id):
+    """Show reconciliation status for a bank statement."""
+    from .reconciliation import BankReconciliation
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    recon_obj = BankReconciliation(ledger)
+    result = recon_obj.reconcile(statement_id)
+    
+    console.print(Panel(
+        f"[cyan]Statement:[/cyan] {result.statement_id[:8]}\n"
+        f"[cyan]Total Lines:[/cyan] {result.total_statement_lines}\n"
+        f"[cyan]Matched:[/cyan] {result.matched}\n"
+        f"[cyan]Unmatched:[/cyan] {result.unmatched_statement}\n"
+        f"[cyan]Disputed:[/cyan] {result.disputed}\n"
+        f"[cyan]Bank Balance:[/cyan] {result.statement_closing_balance:,.2f}\n"
+        f"[cyan]Ledger Balance:[/cyan] {result.ledger_balance:,.2f}\n"
+        f"[cyan]Difference:[/cyan] {result.difference:,.2f}\n"
+        f"[cyan]Balanced:[/cyan] {'Yes' if result.is_balanced else 'No'}",
+        title="Reconciliation Status",
+    ))
+
+
+@recon.command("complete")
+@click.argument("statement_id")
+@click.pass_context
+@handle_error
+def recon_complete(ctx, statement_id):
+    """Complete a bank reconciliation (all lines must be matched)."""
+    from .reconciliation import BankReconciliation
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    recon_obj = BankReconciliation(ledger)
+    result = recon_obj.complete_reconciliation(statement_id)
+    console.print(f"[green]✓[/green] Reconciliation completed!")
+    console.print(f"  Matched: {result.matched}  |  Difference: {result.difference:,.2f}")
+
+
+@recon.command("unreconciled")
+@click.argument("account_code")
+@click.pass_context
+@handle_error
+def recon_unreconciled(ctx, account_code):
+    """List unreconciled ledger entries for an account."""
+    from .reconciliation import BankReconciliation
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    recon_obj = BankReconciliation(ledger)
+    entries = recon_obj.get_unreconciled_entries(account_code)
+    
+    if not entries:
+        console.print("[green]No unreconciled entries found[/green]")
+        return
+    
+    table = Table(title=f"Unreconciled Entries — {account_code}")
+    table.add_column("Entry ID", style="cyan", max_width=8)
+    table.add_column("Date")
+    table.add_column("Description")
+    table.add_column("Amount", justify="right")
+    
+    for e in entries:
+        table.add_row(
+            e["entry_id"][:8],
+            e["date"][:10],
+            e["description"][:40],
+            f"{e['amount']:,.2f}",
+        )
+    
+    console.print(table)
+
+
+@recon.command("dispute")
+@click.argument("statement_id")
+@click.argument("line_id")
+@click.option("--reason", "-r", default=None, help="Reason for dispute")
+@click.pass_context
+@handle_error
+def recon_dispute(ctx, statement_id, line_id, reason):
+    """Mark a statement line as disputed."""
+    from .reconciliation import BankReconciliation
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    recon_obj = BankReconciliation(ledger)
+    line = recon_obj.mark_disputed(statement_id, line_id, reason=reason)
+    console.print(f"[yellow]⚠[/yellow] Line {line_id[:8]} marked as disputed")
+
+
+@recon.command("delete-statement")
+@click.argument("statement_id")
+@click.pass_context
+@handle_error
+def recon_delete_statement(ctx, statement_id):
+    """Delete a bank statement."""
+    from .reconciliation import BankReconciliation
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    recon_obj = BankReconciliation(ledger)
+    recon_obj.delete_statement(statement_id)
+    console.print(f"[green]✓[/green] Statement {statement_id[:8]} deleted")
+
+
+# ── Budget Commands ────────────────────────────────────────────
+
+@cli.group("budget")
+def budget():
+    """Budget management and variance tracking."""
+    pass
+
+
+@budget.command("create")
+@click.argument("name")
+@click.option("--period-start", "-s", default=None, help="Budget period start date (ISO 8601)")
+@click.option("--period-end", "-e", default=None, help="Budget period end date (ISO 8601)")
+@click.option("--line", "-l", multiple=True, help="Budget line: account:amount (e.g., rent:5000)")
+@click.pass_context
+@handle_error
+def budget_create(ctx, name, period_start, period_end, line):
+    """Create a new budget."""
+    from .budget import BudgetManager
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    bm = BudgetManager(ledger)
+
+    budget_lines = []
+    for line_str in line:
+        try:
+            code, amount_str = line_str.split(":", 1)
+            budget_lines.append({
+                "account_code": code.strip(),
+                "budgeted_amount": float(amount_str),
+            })
+        except (ValueError, IndexError):
+            console.print(f"[red]Invalid line format:[/red] {line_str}. Expected account:amount")
+            sys.exit(1)
+
+    ps = _parse_cli_date(period_start)
+    pe = _parse_cli_date(period_end)
+    b = bm.create_budget(
+        name=name,
+        period_start=ps,
+        period_end=pe,
+        budget_lines=budget_lines if budget_lines else None,
+    )
+    console.print(f"[green]✓[/green] Budget created: {b.id[:8]}")
+    console.print(f"  Name: {b.name}")
+    console.print(f"  Lines: {len(b.lines)}")
+    console.print(f"  Total Budgeted: {b.total_budgeted:,.2f}")
+    console.print(f"  Status: {b.status}")
+
+
+@budget.command("list")
+@click.option("--status", "-s", default=None, type=click.Choice(["draft", "active", "closed"]),
+              help="Filter by status")
+@click.pass_context
+@handle_error
+def budget_list(ctx, status):
+    """List all budgets."""
+    from .budget import BudgetManager
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    bm = BudgetManager(ledger)
+    budgets = bm.list_budgets(status=status)
+
+    if not budgets:
+        console.print("[yellow]No budgets found[/yellow]")
+        return
+
+    table = Table(title="Budgets")
+    table.add_column("ID", style="cyan", max_width=8)
+    table.add_column("Name")
+    table.add_column("Status")
+    table.add_column("Lines", justify="right")
+    table.add_column("Budgeted", justify="right", style="green")
+    table.add_column("Actual", justify="right", style="yellow")
+    table.add_column("Variance", justify="right")
+
+    for b in budgets:
+        var_str = f"{b.total_variance:+,.2f}"
+        table.add_row(
+            b.id[:8],
+            b.name,
+            b.status,
+            str(len(b.lines)),
+            f"{b.total_budgeted:,.2f}",
+            f"{b.total_actual:,.2f}",
+            var_str,
+        )
+
+    console.print(table)
+
+
+@budget.command("show")
+@click.argument("budget_id")
+@click.pass_context
+@handle_error
+def budget_show(ctx, budget_id):
+    """Show budget details and variance report."""
+    from .budget import BudgetManager, format_variance_report
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    bm = BudgetManager(ledger)
+    report = bm.get_variance_report(budget_id)
+    console.print(format_variance_report(report))
+
+
+@budget.command("add-line")
+@click.argument("budget_id")
+@click.argument("account_code")
+@click.argument("amount", type=float)
+@click.pass_context
+@handle_error
+def budget_add_line(ctx, budget_id, account_code, amount):
+    """Add or update a budget line."""
+    from .budget import BudgetManager
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    bm = BudgetManager(ledger)
+    line = bm.add_budget_line(budget_id, account_code, amount)
+    console.print(f"[green]✓[/green] Budget line added: {line.account_code} = {line.budgeted_amount:,.2f}")
+
+
+@budget.command("remove-line")
+@click.argument("budget_id")
+@click.argument("account_code")
+@click.pass_context
+@handle_error
+def budget_remove_line(ctx, budget_id, account_code):
+    """Remove a budget line."""
+    from .budget import BudgetManager
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    bm = BudgetManager(ledger)
+    bm.remove_budget_line(budget_id, account_code)
+    console.print(f"[green]✓[/green] Budget line removed: {account_code}")
+
+
+@budget.command("activate")
+@click.argument("budget_id")
+@click.pass_context
+@handle_error
+def budget_activate(ctx, budget_id):
+    """Activate a draft budget."""
+    from .budget import BudgetManager
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    bm = BudgetManager(ledger)
+    b = bm.activate_budget(budget_id)
+    console.print(f"[green]✓[/green] Budget '{b.name}' activated")
+
+
+@budget.command("close")
+@click.argument("budget_id")
+@click.pass_context
+@handle_error
+def budget_close(ctx, budget_id):
+    """Close an active budget."""
+    from .budget import BudgetManager
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    bm = BudgetManager(ledger)
+    b = bm.close_budget(budget_id)
+    console.print(f"[green]✓[/green] Budget '{b.name}' closed")
+
+
+@budget.command("delete")
+@click.argument("budget_id")
+@click.pass_context
+@handle_error
+def budget_delete(ctx, budget_id):
+    """Delete a draft budget."""
+    from .budget import BudgetManager
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    bm = BudgetManager(ledger)
+    bm.delete_budget(budget_id)
+    console.print(f"[green]✓[/green] Budget deleted")
+
+
+# ── Fiscal Year Commands ──────────────────────────────────────
+
+@cli.group("fiscal")
+def fiscal():
+    """Fiscal year management."""
+    pass
+
+
+@fiscal.command("create")
+@click.argument("name")
+@click.argument("start_date")
+@click.argument("end_date")
+@click.option("--period-type", "-p", default="month", type=click.Choice(["month", "quarter"]),
+              help="Period type to generate")
+@click.pass_context
+@handle_error
+def fiscal_create(ctx, name, start_date, end_date, period_type):
+    """Create a fiscal year (dates in ISO 8601, e.g., 2024-01-01 2024-12-31)."""
+    from .fiscal import FiscalYearManager
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    fm = FiscalYearManager(ledger)
+    sd = _parse_cli_date(start_date)
+    ed = _parse_cli_date(end_date)
+    if sd is None or ed is None:
+        console.print("[red]Error:[/red] Invalid date format")
+        sys.exit(1)
+    fy = fm.create_fiscal_year(
+        name=name,
+        start_date=sd,
+        end_date=ed,
+        period_type=period_type,
+    )
+    console.print(f"[green]✓[/green] Fiscal year created: {fy.name}")
+    console.print(f"  ID: {fy.id[:8]}")
+    console.print(f"  Periods: {len(fy.periods)}")
+    console.print(f"  Status: {fy.status}")
+
+
+@fiscal.command("list")
+@click.option("--status", "-s", default=None, type=click.Choice(["open", "closed"]),
+              help="Filter by status")
+@click.pass_context
+@handle_error
+def fiscal_list(ctx, status):
+    """List fiscal years."""
+    from .fiscal import FiscalYearManager
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    fm = FiscalYearManager(ledger)
+    years = fm.list_fiscal_years(status=status)
+
+    if not years:
+        console.print("[yellow]No fiscal years found[/yellow]")
+        return
+
+    table = Table(title="Fiscal Years")
+    table.add_column("ID", style="cyan", max_width=8)
+    table.add_column("Name")
+    table.add_column("Start")
+    table.add_column("End")
+    table.add_column("Periods", justify="right")
+    table.add_column("Status")
+
+    for fy in years:
+        table.add_row(
+            fy.id[:8],
+            fy.name,
+            fy.start_date.strftime("%Y-%m-%d"),
+            fy.end_date.strftime("%Y-%m-%d"),
+            str(len(fy.periods)),
+            fy.status,
+        )
+
+    console.print(table)
+
+
+@fiscal.command("close")
+@click.argument("fy_id")
+@click.pass_context
+@handle_error
+def fiscal_close(ctx, fy_id):
+    """Close a fiscal year."""
+    from .fiscal import FiscalYearManager
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    fm = FiscalYearManager(ledger)
+    fy = fm.close_fiscal_year(fy_id)
+    console.print(f"[green]✓[/green] Fiscal year '{fy.name}' closed")
+
+
+@fiscal.command("active")
+@click.pass_context
+@handle_error
+def fiscal_active(ctx):
+    """Show the active fiscal year."""
+    from .fiscal import FiscalYearManager
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    fm = FiscalYearManager(ledger)
+    fy = fm.get_active_fiscal_year()
+    if fy is None:
+        console.print("[yellow]No active fiscal year found[/yellow]")
+        return
+    console.print(Panel(
+        f"[cyan]ID:[/cyan] {fy.id[:8]}\n"
+        f"[cyan]Name:[/cyan] {fy.name}\n"
+        f"[cyan]Start:[/cyan] {fy.start_date.strftime('%Y-%m-%d')}\n"
+        f"[cyan]End:[/cyan] {fy.end_date.strftime('%Y-%m-%d')}\n"
+        f"[cyan]Periods:[/cyan] {len(fy.periods)}\n"
+        f"[cyan]Status:[/cyan] {fy.status}",
+        title="Active Fiscal Year",
+    ))
+
+
+# ── Additional Report Commands ─────────────────────────────────
+
+@report.command("tax-summary")
+@click.option("--from-date", "-f", default=None, help="Start date (ISO 8601)")
+@click.option("--to-date", "-t", default=None, help="End date (ISO 8601)")
+@click.option("--tax-rate", "-r", type=float, default=0.0, help="Tax rate for estimation (e.g., 0.21)")
+@click.pass_context
+@handle_error
+def report_tax_summary(ctx, from_date, to_date, tax_rate):
+    """Generate a tax summary report."""
+    from .tax import generate_tax_summary, format_tax_summary
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    fd = _parse_cli_date(from_date)
+    td = _parse_cli_date(to_date)
+    report = generate_tax_summary(ledger, from_date=fd, to_date=td, tax_rate=tax_rate)
+    console.print(format_tax_summary(report))
+
+
+@report.command("general-ledger")
+@click.option("--account", "-a", default=None, help="Filter by account code")
+@click.option("--from-date", "-f", default=None, help="Start date (ISO 8601)")
+@click.option("--to-date", "-t", default=None, help="End date (ISO 8601)")
+@click.option("--tag", "-g", default=None, help="Filter by tag")
+@click.pass_context
+@handle_error
+def report_general_ledger(ctx, account, from_date, to_date, tag):
+    """Generate a General Ledger report (detailed journal with running balances)."""
+    from .general_ledger import generate_general_ledger, format_general_ledger
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    fd = _parse_cli_date(from_date)
+    td = _parse_cli_date(to_date)
+    report = generate_general_ledger(
+        ledger,
+        account_code=account,
+        from_date=fd,
+        to_date=td,
+        tag=tag,
+    )
+    console.print(format_general_ledger(report))
+
+
+# ── v0.6.0: Search & Account Tags ───────────────────────────────
+
+@cli.command("search")
+@click.argument("query")
+@click.option("--account", "-a", default=None, help="Filter by account code")
+@click.option("--tag", "-g", default=None, help="Filter by tag")
+@click.option("--limit", "-l", default=20, type=int, help="Max results")
+@click.pass_context
+@handle_error
+def search_entries(ctx, query, account, tag, limit):
+    """Search journal entries by description (case-insensitive)."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    results = ledger.search_entries(query=query, account_code=account, tag=tag, limit=limit)
+
+    if not results:
+        console.print("[yellow]No matching entries found[/yellow]")
+        return
+
+    table = Table(title=f"Search Results: '{query}'")
+    table.add_column("ID", style="cyan", max_width=8)
+    table.add_column("Date")
+    table.add_column("Description", max_width=40)
+    table.add_column("Debit", justify="right")
+    table.add_column("Credit", justify="right")
+    table.add_column("Tags")
+
+    for e in results:
+        total_debit = sum(l.debit for l in e.lines)
+        total_credit = sum(l.credit for l in e.lines)
+        table.add_row(
+            e.id[:8],
+            e.timestamp.strftime("%Y-%m-%d"),
+            e.description[:40],
+            f"{total_debit:,.2f}" if total_debit else "",
+            f"{total_credit:,.2f}" if total_credit else "",
+            ", ".join(e.tags) if e.tags else "",
+        )
+
+    console.print(table)
+    console.print(f"[dim]Found {len(results)} matching entries[/dim]")
+
+
+@account.command("tag")
+@click.argument("code")
+@click.argument("tag")
+@click.pass_context
+@handle_error
+def account_add_tag(ctx, code, tag):
+    """Add a tag to an account."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    account = ledger.get_account(code)
+    if tag not in account.tags:
+        account.tags.append(tag)
+        ledger.save()
+    console.print(f"[green]✓[/green] Tag '{tag}' added to account {code}")
+
+
+@account.command("untag")
+@click.argument("code")
+@click.argument("tag")
+@click.pass_context
+@handle_error
+def account_remove_tag(ctx, code, tag):
+    """Remove a tag from an account."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    account = ledger.get_account(code)
+    if tag in account.tags:
+        account.tags.remove(tag)
+        ledger.save()
+    console.print(f"[green]✓[/green] Tag '{tag}' removed from account {code}")
+
+
+@account.command("by-tag")
+@click.argument("tag")
+@click.pass_context
+@handle_error
+def account_list_by_tag(ctx, tag):
+    """List accounts that have a specific tag."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    accounts = ledger.list_accounts(tag=tag)
+
+    if not accounts:
+        console.print(f"[yellow]No accounts found with tag '{tag}'[/yellow]")
+        return
+
+    table = Table(title=f"Accounts tagged '{tag}'")
+    table.add_column("Code", style="cyan")
+    table.add_column("Name")
+    table.add_column("Type")
+    table.add_column("Active")
+    table.add_column("Tags")
+
+    for a in accounts:
+        table.add_row(
+            a.code,
+            a.name,
+            a.account_type.value,
+            "✓" if a.active else "✗",
+            ", ".join(a.tags),
+        )
+
+    console.print(table)
 
 
 # ── Serve Command (MCP) ─────────────────────────────────────────

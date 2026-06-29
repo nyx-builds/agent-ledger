@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from .models import AccountType, AccountBalance
@@ -81,8 +81,17 @@ def generate_trial_balance(ledger: Ledger, as_of: Optional[datetime] = None) -> 
     Lists all accounts with their debit or credit balance.
     Debit-balance accounts show under Debit column.
     Credit-balance accounts show under Credit column.
+
+    If as_of is provided, only entries up to that date are included.
     """
-    balances = ledger.get_all_balances()
+    # Filter entries by date if as_of is provided
+    if as_of is not None:
+        as_of_aware = _ensure_aware(as_of)
+        filtered_entries = [e for e in ledger.data.entries if _ensure_aware(e.timestamp) <= as_of_aware]
+        balances = _compute_balances_from_entries(ledger, filtered_entries)
+    else:
+        balances = ledger.get_all_balances()
+
     rows = []
     total_debits = 0.0
     total_credits = 0.0
@@ -127,8 +136,20 @@ def generate_income_statement(
 
     Shows revenue and expense accounts with their balances.
     Net income = total revenue - total expenses.
+
+    If from_date/to_date are provided, only entries in that range are included.
     """
-    balances = ledger.get_all_balances()
+    if from_date is not None or to_date is not None:
+        filtered_entries = list(ledger.data.entries)
+        if from_date is not None:
+            from_aware = _ensure_aware(from_date)
+            filtered_entries = [e for e in filtered_entries if _ensure_aware(e.timestamp) >= from_aware]
+        if to_date is not None:
+            to_aware = _ensure_aware(to_date)
+            filtered_entries = [e for e in filtered_entries if _ensure_aware(e.timestamp) <= to_aware]
+        balances = _compute_balances_from_entries(ledger, filtered_entries)
+    else:
+        balances = ledger.get_all_balances()
 
     revenue_rows = []
     expense_rows = []
@@ -170,9 +191,17 @@ def generate_balance_sheet(
     """Generate a balance sheet.
 
     Assets = Liabilities + Equity + Retained Earnings (Net Income)
+
+    If as_of is provided, only entries up to that date are included.
     """
-    balances = ledger.get_all_balances()
-    income_statement = generate_income_statement(ledger)
+    if as_of is not None:
+        as_of_aware = _ensure_aware(as_of)
+        filtered_entries = [e for e in ledger.data.entries if _ensure_aware(e.timestamp) <= as_of_aware]
+        balances = _compute_balances_from_entries(ledger, filtered_entries)
+        income_statement = generate_income_statement(ledger, to_date=as_of)
+    else:
+        balances = ledger.get_all_balances()
+        income_statement = generate_income_statement(ledger)
 
     assets = []
     liabilities = []
@@ -314,3 +343,44 @@ def format_balance_sheet(report: BalanceSheet) -> str:
     balanced = abs(report.total_assets - total_le) < 0.01
     lines.append(f"Balanced (Assets = L + E): {'Yes' if balanced else 'No'}")
     return "\n".join(lines)
+
+
+def _ensure_aware(dt: datetime) -> datetime:
+    """Ensure a datetime is timezone-aware (assume UTC if naive)."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _compute_balances_from_entries(
+    ledger: Ledger,
+    entries: list,
+) -> list[AccountBalance]:
+    """Compute account balances from a filtered set of entries.
+
+    This is used by date-filtered report generation.
+    """
+    accounts = ledger.list_accounts()
+    debit_totals = {a.code: 0.0 for a in accounts}
+    credit_totals = {a.code: 0.0 for a in accounts}
+    account_map = {a.code: a for a in accounts}
+
+    for entry in entries:
+        for line in entry.lines:
+            code = line.account_code
+            if code in debit_totals:
+                debit_totals[code] += line.debit
+                credit_totals[code] += line.credit
+
+    balances = []
+    for a in accounts:
+        balances.append(AccountBalance(
+            account_code=a.code,
+            account_name=a.name,
+            account_type=a.account_type,
+            currency=a.currency,
+            debit_total=round(debit_totals.get(a.code, 0.0), 2),
+            credit_total=round(credit_totals.get(a.code, 0.0), 2),
+        ))
+
+    return balances

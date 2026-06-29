@@ -59,6 +59,7 @@ class Account(BaseModel):
     description: str = Field(default="", description="Account description")
     active: bool = Field(default=True, description="Whether the account is active")
     parent_code: Optional[str] = Field(default=None, description="Parent account code for hierarchy")
+    tags: list[str] = Field(default_factory=list, description="Tags for filtering and grouping")
     metadata: dict = Field(default_factory=dict, description="Additional metadata")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -221,5 +222,8 @@ class LedgerData(BaseModel):
     exchange_rates: list[ExchangeRate] = Field(default_factory=list)
     audit_log: AuditLogData = Field(default_factory=AuditLogData, description="Audit log entries")
     closed_periods: list[dict] = Field(default_factory=list, description="List of closed period records")
+    bank_statements: list[dict] = Field(default_factory=list, description="Bank statement data for reconciliation")
+    budgets: list[dict] = Field(default_factory=list, description="Budget definitions and tracking")
+    metadata: dict = Field(default_factory=dict, description="Extensible metadata storage")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

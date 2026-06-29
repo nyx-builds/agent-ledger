@@ -84,6 +84,24 @@ class CurrencyConverter:
         rate = self.get_rate(from_currency, to_currency, as_of)
         return round(amount * rate.rate, 2)
 
+    def convert_balance(self, balance, to_currency: str,
+                        as_of: Optional[datetime] = None) -> float:
+        """Convert an AccountBalance to a target currency.
+
+        Args:
+            balance: An AccountBalance object
+            to_currency: Target currency code
+            as_of: Optional date for historical rates
+
+        Returns:
+            The converted balance amount
+        """
+        if balance.currency.upper() == to_currency.upper():
+            return balance.balance
+
+        rate = self.get_rate(balance.currency, to_currency, as_of)
+        return round(balance.balance * rate.rate, 2)
+
     def list_rates(self) -> list[ExchangeRate]:
         """List all exchange rates."""
         return list(self._rates)
