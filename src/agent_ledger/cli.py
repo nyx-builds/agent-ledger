@@ -2077,6 +2077,259 @@ def asset_delete(ctx, asset_id):
     console.print("[green]✓[/green] Asset deleted.")
 
 
+# ── Cost Center Commands ─────────────────────────────────────────
+
+@cli.group("cost-center")
+def cost_center():
+    """Manage cost centers, profit centers, and projects."""
+
+
+@cost_center.command("create")
+@click.argument("code")
+@click.argument("name")
+@click.option("--type", "-t", "center_type", default="cost",
+              type=click.Choice(["cost", "profit", "project", "department", "investment"]),
+              help="Center type")
+@click.option("--description", "-d", default="", help="Description")
+@click.option("--parent", "-p", default=None, help="Parent cost center code")
+@click.option("--tag", "tags", multiple=True, help="Tags")
+@click.pass_context
+@handle_error
+def cost_center_create(ctx, code, name, center_type, description, parent, tags):
+    """Create a new cost center, profit center, or project."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .cost_centers import CostCenterManager
+    mgr = CostCenterManager(ledger)
+    cc = mgr.create(code, name, center_type, description, parent, list(tags) if tags else None)
+    console.print(f"[green]✓[/green] Created cost center: {cc.code} ({cc.name})")
+    console.print(f"  Type: {cc.center_type}")
+    if cc.parent_code:
+        console.print(f"  Parent: {cc.parent_code}")
+
+
+@cost_center.command("list")
+@click.option("--type", "-t", "center_type", default=None, help="Filter by type")
+@click.option("--active-only", is_flag=True, help="Show only active centers")
+@click.pass_context
+@handle_error
+def cost_center_list(ctx, center_type, active_only):
+    """List all cost centers."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .cost_centers import CostCenterManager
+    mgr = CostCenterManager(ledger)
+    centers = mgr.list(active_only=active_only, center_type=center_type)
+    if not centers:
+        console.print("[yellow]No cost centers found.[/yellow]")
+        return
+
+    table = Table(title="Cost Centers")
+    table.add_column("Code", style="cyan")
+    table.add_column("Name")
+    table.add_column("Type")
+    table.add_column("Active")
+    table.add_column("Parent")
+    for cc in centers:
+        table.add_row(cc.code, cc.name, cc.center_type,
+                       "✓" if cc.active else "✗", cc.parent_code or "")
+    console.print(table)
+
+
+@cost_center.command("show")
+@click.argument("code")
+@click.pass_context
+@handle_error
+def cost_center_show(ctx, code):
+    """Show details of a cost center."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .cost_centers import CostCenterManager
+    mgr = CostCenterManager(ledger)
+    cc = mgr.get(code)
+    console.print(f"[cyan]Cost Center: {cc.name} ({cc.code})[/cyan]")
+    console.print(f"  Type: {cc.center_type}")
+    console.print(f"  Active: {'Yes' if cc.active else 'No'}")
+    console.print(f"  Parent: {cc.parent_code or '(none)'}")
+    if cc.description:
+        console.print(f"  Description: {cc.description}")
+    if cc.tags:
+        console.print(f"  Tags: {', '.join(cc.tags)}")
+    entries = mgr.list_entries(code)
+    console.print(f"  Entries assigned: {len(entries)}")
+
+
+@cost_center.command("update")
+@click.argument("code")
+@click.option("--name", "-n", default=None, help="New name")
+@click.option("--description", "-d", default=None, help="New description")
+@click.option("--active/--inactive", default=None, help="Set active status")
+@click.option("--tag", "tags", multiple=True, help="Set tags (replaces existing)")
+@click.pass_context
+@handle_error
+def cost_center_update(ctx, code, name, description, active, tags):
+    """Update a cost center."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .cost_centers import CostCenterManager
+    mgr = CostCenterManager(ledger)
+    mgr.update(code, name, description, active, list(tags) if tags else None)
+    console.print(f"[green]✓[/green] Updated cost center: {code}")
+
+
+@cost_center.command("delete")
+@click.argument("code")
+@click.pass_context
+@handle_error
+def cost_center_delete(ctx, code):
+    """Delete a cost center."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .cost_centers import CostCenterManager
+    mgr = CostCenterManager(ledger)
+    mgr.delete(code)
+    console.print(f"[green]✓[/green] Deleted cost center: {code}")
+
+
+@cost_center.command("assign")
+@click.argument("entry_id")
+@click.argument("cost_center_code")
+@click.pass_context
+@handle_error
+def cost_center_assign(ctx, entry_id, cost_center_code):
+    """Assign a journal entry to a cost center."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .cost_centers import CostCenterManager
+    mgr = CostCenterManager(ledger)
+    entry = mgr.assign_entry(entry_id, cost_center_code)
+    console.print(f"[green]✓[/green] Entry {entry_id} assigned to {cost_center_code}")
+
+
+@cost_center.command("unassign")
+@click.argument("entry_id")
+@click.pass_context
+@handle_error
+def cost_center_unassign(ctx, entry_id):
+    """Remove cost center assignment from an entry."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .cost_centers import CostCenterManager
+    mgr = CostCenterManager(ledger)
+    mgr.unassign_entry(entry_id)
+    console.print(f"[green]✓[/green] Unassigned entry {entry_id}")
+
+
+@cost_center.command("report")
+@click.argument("code")
+@click.option("--from-date", "-f", default=None, help="Start date (ISO 8601)")
+@click.option("--to-date", "-t", default=None, help="End date (ISO 8601)")
+@click.pass_context
+@handle_error
+def cost_center_report(ctx, code, from_date, to_date):
+    """Generate a financial report for a cost center."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .cost_centers import CostCenterManager, format_cost_center_report
+    mgr = CostCenterManager(ledger)
+    fd = _parse_cli_date(from_date)
+    td = _parse_cli_date(to_date)
+    report = mgr.report(code, fd, td)
+    console.print(format_cost_center_report(report))
+
+
+@cost_center.command("summary")
+@click.option("--from-date", "-f", default=None, help="Start date (ISO 8601)")
+@click.option("--to-date", "-t", default=None, help="End date (ISO 8601)")
+@click.pass_context
+@handle_error
+def cost_center_summary(ctx, from_date, to_date):
+    """Show summary of all cost centers."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .cost_centers import CostCenterManager, format_cost_center_summary
+    mgr = CostCenterManager(ledger)
+    fd = _parse_cli_date(from_date)
+    td = _parse_cli_date(to_date)
+    summary = mgr.summary(fd, td)
+    console.print(format_cost_center_summary(summary))
+
+
+@cost_center.command("tree")
+@click.argument("parent_code", required=False)
+@click.pass_context
+@handle_error
+def cost_center_tree(ctx, parent_code):
+    """Show cost center hierarchy tree."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .cost_centers import CostCenterManager
+    mgr = CostCenterManager(ledger)
+    tree = mgr.get_hierarchy(parent_code)
+
+    def _print_tree(nodes, indent=0):
+        for node in nodes:
+            prefix = "  " * indent + ("├─ " if indent > 0 else "")
+            active_tag = "" if node["active"] else " (inactive)"
+            console.print(f"{prefix}{node['code']} — {node['name']}{active_tag} [{node['center_type']}]")
+            if node["children"]:
+                _print_tree(node["children"], indent + 1)
+
+    if not tree:
+        console.print("[yellow]No cost centers found.[/yellow]")
+    else:
+        _print_tree(tree)
+
+
+# ── Comparison Report Commands ───────────────────────────────────
+
+@cli.group("compare")
+def compare():
+    """Multi-period comparison reports."""
+
+
+@compare.command("balances")
+@click.option("--period", "-p", multiple=True, required=True,
+              help="Period as 'YYYY-MM-DD,YYYY-MM-DD,label' (from,to,label)")
+@click.pass_context
+@handle_error
+def compare_balances(ctx, period):
+    """Compare account balances across multiple periods.
+
+    Each --period is 'FROM,TO,LABEL'. Example:
+
+      agent-ledger compare balances \\
+        -p 2024-01-01,2024-03-31,Q1 \\
+        -p 2024-04-01,2024-06-30,Q2
+    """
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .comparison import compare_account_balances, format_period_comparison
+    periods = _parse_period_args(period)
+    report = compare_account_balances(ledger, periods)
+    console.print(format_period_comparison(report))
+
+
+@compare.command("income")
+@click.option("--period", "-p", multiple=True, required=True,
+              help="Period as 'YYYY-MM-DD,YYYY-MM-DD,label' (from,to,label)")
+@click.pass_context
+@handle_error
+def compare_income(ctx, period):
+    """Compare income statements across multiple periods."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .comparison import compare_income_statements, format_income_statement_comparison
+    periods = _parse_period_args(period)
+    report = compare_income_statements(ledger, periods)
+    console.print(format_income_statement_comparison(report))
+
+
+def _parse_period_args(period_args) -> list:
+    """Parse --period strings into (from_date, to_date, label) tuples."""
+    from datetime import datetime as dt
+    results = []
+    for p in period_args:
+        parts = p.split(",")
+        if len(parts) != 3:
+            raise click.UsageError(
+                f"Period must be 'FROM,TO,LABEL', got: {p}"
+            )
+        from_str, to_str, label = parts
+        from_date = dt.fromisoformat(from_str) if from_str.strip() else None
+        to_date = dt.fromisoformat(to_str) if to_str.strip() else None
+        results.append((from_date, to_date, label.strip()))
+    return results
+
+
 # ── Serve Command (MCP) ─────────────────────────────────────────
 
 @cli.command("serve")
@@ -2087,7 +2340,6 @@ def serve(ctx):
     from .mcp_server import run_server
     console.print("[cyan]Starting Agent Ledger MCP server...[/cyan]")
     run_server(ledger_path=ctx.obj["ledger_file"])
-
 
 if __name__ == "__main__":
     cli()

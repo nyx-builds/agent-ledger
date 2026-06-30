@@ -20,6 +20,8 @@ Create and manage a chart of accounts, post journal entries with full double-ent
 - **CSV Import** — Import accounts and journal entries from CSV files
 - **Audit Log** — Track all ledger operations with timestamps and actor attribution
 - **CSV Export** — Export accounts, entries, and reports to CSV files
+- **Cost Centers / Projects** — Dimensional accounting for tracking profitability by project, department, or cost center
+- **Multi-Period Comparison** — Side-by-side period analysis with variance and percentage change
 - **Data Persistence** — JSON-based storage, portable and human-readable
 - **CLI** — Full-featured Click CLI with rich output
 - **MCP Server** — Model Context Protocol server for autonomous agent integration
@@ -114,6 +116,39 @@ This starts an MCP server that exposes all ledger operations as tools for autono
 - **Multi-Currency**: `add_exchange_rate`, `list_exchange_rates`
 - **v0.2.0**: `close_period`, `get_account_hierarchy`, `get_rollup_balance`, `validate_hierarchy`, `list_audit_log`, `export_csv`, `list_closed_periods`
 - **v0.3.0**: `reverse_entry`, `apply_template`, `list_templates`, `import_accounts_csv`, `import_entries_csv`
+- **v0.9.0**: `create_cost_center`, `list_cost_centers`, `cost_center_report`, `cost_center_summary`, `assign_entry_to_cost_center`, `compare_account_balances`, `compare_income_statements`
+
+### Cost Centers / Projects
+
+Track revenue and expenses by project, department, or cost center for profitability analysis:
+
+```bash
+# Create cost centers
+agent-ledger cost-center create proj-alpha "Project Alpha" --type project
+agent-ledger cost-center create dept-eng "Engineering" --type department
+
+# Assign entries to cost centers (via MCP or programmatically)
+# Then view profitability per project:
+agent-ledger cost-center report proj-alpha
+agent-ledger cost-center summary
+agent-ledger cost-center tree
+```
+
+### Multi-Period Comparison
+
+Compare financial performance across time periods with variance analysis:
+
+```bash
+# Compare account balances across quarters
+agent-ledger compare balances \
+  -p 2024-01-01,2024-03-31,Q1 \
+  -p 2024-04-01,2024-06-30,Q2
+
+# Compare income statements across quarters
+agent-ledger compare income \
+  -p 2024-01-01,2024-03-31,Q1 \
+  -p 2024-04-01,2024-06-30,Q2
+```
 
 ## Architecture
 
@@ -132,12 +167,20 @@ src/agent_ledger/
 ├── cashflow.py       # Cash flow statement generation (indirect method)
 ├── templates.py      # Chart of accounts templates (solo, startup, freelancer)
 ├── import_csv.py     # CSV import for accounts and journal entries
+├── cost_centers.py   # Cost centers / dimensional accounting
+├── comparison.py     # Multi-period comparison reports
 ├── cli.py             # Click CLI
 ├── mcp_server.py      # MCP server for agent integration
 └── exceptions.py      # Custom exceptions
 ```
 
 ## Changelog
+
+### v0.9.0
+- **Cost Centers / Projects**: Dimensional accounting for tracking revenue and expenses by project, department, or cost center. Full CRUD, entry assignment, per-center financial reports, cross-center summary, and hierarchy tree
+- **Multi-Period Comparison**: Side-by-side period comparison of account balances and income statements with variance and percentage change indicators (up/down/stable/new/gone)
+- 11 new MCP tools (89 total), new CLI command groups (`cost-center`, `compare`)
+- 66 new tests (580 total)
 
 ### v0.2.0
 - **Period Close**: Close accounting periods, zero out revenue/expense accounts into retained earnings

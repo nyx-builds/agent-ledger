@@ -1128,6 +1128,210 @@ TOOLS = [
             "required": ["asset_id"],
         },
     },
+    # ── Cost Center tools ──────────────────────────────────────
+    {
+        "name": "create_cost_center",
+        "description": (
+            "Create a cost center, profit center, or project for dimensional "
+            "accounting. Enables tracking revenue and expenses by project, "
+            "department, or any business dimension."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Unique code (e.g. 'proj-alpha')"},
+                "name": {"type": "string", "description": "Human-readable name"},
+                "center_type": {
+                    "type": "string",
+                    "enum": ["cost", "profit", "project", "department", "investment"],
+                    "description": "Center type",
+                    "default": "cost",
+                },
+                "description": {"type": "string", "description": "Description", "default": ""},
+                "parent_code": {"type": "string", "description": "Parent cost center code for hierarchy", "default": None},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags", "default": []},
+            },
+            "required": ["code", "name"],
+        },
+    },
+    {
+        "name": "list_cost_centers",
+        "description": "List all cost centers, optionally filtered by type or active status.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "center_type": {
+                    "type": "string",
+                    "enum": ["cost", "profit", "project", "department", "investment"],
+                    "description": "Filter by type",
+                },
+                "active_only": {"type": "boolean", "description": "Show only active centers", "default": False},
+            },
+        },
+    },
+    {
+        "name": "get_cost_center",
+        "description": "Get details of a specific cost center.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Cost center code"},
+            },
+            "required": ["code"],
+        },
+    },
+    {
+        "name": "update_cost_center",
+        "description": "Update a cost center's name, description, active status, or tags.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Cost center code"},
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+                "active": {"type": "boolean"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["code"],
+        },
+    },
+    {
+        "name": "delete_cost_center",
+        "description": "Delete a cost center. Fails if it has children or entries assigned.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Cost center code"},
+            },
+            "required": ["code"],
+        },
+    },
+    {
+        "name": "assign_entry_to_cost_center",
+        "description": (
+            "Assign a journal entry to a cost center. This enables dimensional "
+            "reporting — all lines in the entry will be attributed to the specified "
+            "cost center for profitability analysis."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "entry_id": {"type": "string", "description": "Journal entry ID"},
+                "cost_center_code": {"type": "string", "description": "Cost center code"},
+            },
+            "required": ["entry_id", "cost_center_code"],
+        },
+    },
+    {
+        "name": "unassign_entry_from_cost_center",
+        "description": "Remove cost center assignment from a journal entry.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "entry_id": {"type": "string", "description": "Journal entry ID"},
+            },
+            "required": ["entry_id"],
+        },
+    },
+    {
+        "name": "cost_center_report",
+        "description": (
+            "Generate a financial report for a specific cost center. Shows all "
+            "account activity (revenue, expenses, assets) for entries assigned "
+            "to the center, with totals and net income."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Cost center code"},
+                "from_date": {"type": "string", "description": "Start date (ISO 8601)", "default": None},
+                "to_date": {"type": "string", "description": "End date (ISO 8601)", "default": None},
+            },
+            "required": ["code"],
+        },
+    },
+    {
+        "name": "cost_center_summary",
+        "description": (
+            "Generate a summary of all cost centers with revenue, expenses, "
+            "and net income. Also shows unassigned entry totals. Useful for "
+            "comparing profitability across projects or departments."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "from_date": {"type": "string", "description": "Start date (ISO 8601)", "default": None},
+                "to_date": {"type": "string", "description": "End date (ISO 8601)", "default": None},
+            },
+        },
+    },
+    {
+        "name": "cost_center_hierarchy",
+        "description": "Get the cost center hierarchy as a tree structure.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "parent_code": {"type": "string", "description": "Get subtree under this parent (default: full tree)", "default": None},
+            },
+        },
+    },
+    # ── Period Comparison tools ────────────────────────────────
+    {
+        "name": "compare_account_balances",
+        "description": (
+            "Compare account balances across multiple time periods. Shows "
+            "each account's value in each period, variance, and percentage "
+            "change. Useful for trend analysis and period-over-period comparisons."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "periods": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "from_date": {"type": "string", "description": "Start date (ISO 8601) or null"},
+                            "to_date": {"type": "string", "description": "End date (ISO 8601) or null"},
+                            "label": {"type": "string", "description": "Period label (e.g. 'Q1 2024')"},
+                        },
+                        "required": ["label"],
+                    },
+                    "description": "At least 2 periods to compare",
+                    "minItems": 2,
+                },
+            },
+            "required": ["periods"],
+        },
+    },
+    {
+        "name": "compare_income_statements",
+        "description": (
+            "Compare income statements across multiple time periods. Shows "
+            "revenue, expenses, and net income side-by-side with variance "
+            "and percentage change. Essential for tracking profitability trends."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "periods": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "from_date": {"type": "string", "description": "Start date (ISO 8601) or null"},
+                            "to_date": {"type": "string", "description": "End date (ISO 8601) or null"},
+                            "label": {"type": "string", "description": "Period label"},
+                        },
+                        "required": ["label"],
+                    },
+                    "description": "At least 2 periods to compare",
+                    "minItems": 2,
+                },
+            },
+            "required": ["periods"],
+        },
+    },
 ]
 
 
@@ -2078,6 +2282,172 @@ def _dispatch(ledger: Ledger, name: str, args: dict) -> Any:
             disposal_account=args.get("disposal_account"),
         )
         return result
+
+    # ── Cost Center handlers ───────────────────────────────────
+    elif name == "create_cost_center":
+        from .cost_centers import CostCenterManager
+        mgr = CostCenterManager(ledger)
+        cc = mgr.create(
+            code=args["code"],
+            name=args["name"],
+            center_type=args.get("center_type", "cost"),
+            description=args.get("description", ""),
+            parent_code=args.get("parent_code"),
+            tags=args.get("tags", []),
+        )
+        return cc.to_dict()
+
+    elif name == "list_cost_centers":
+        from .cost_centers import CostCenterManager
+        mgr = CostCenterManager(ledger)
+        centers = mgr.list(
+            active_only=args.get("active_only", False),
+            center_type=args.get("center_type"),
+        )
+        return [c.to_dict() for c in centers]
+
+    elif name == "get_cost_center":
+        from .cost_centers import CostCenterManager
+        mgr = CostCenterManager(ledger)
+        cc = mgr.get(args["code"])
+        return cc.to_dict()
+
+    elif name == "update_cost_center":
+        from .cost_centers import CostCenterManager
+        mgr = CostCenterManager(ledger)
+        cc = mgr.update(
+            code=args["code"],
+            name=args.get("name"),
+            description=args.get("description"),
+            active=args.get("active"),
+            tags=args.get("tags"),
+        )
+        return cc.to_dict()
+
+    elif name == "delete_cost_center":
+        from .cost_centers import CostCenterManager
+        mgr = CostCenterManager(ledger)
+        mgr.delete(args["code"])
+        return {"status": "deleted", "code": args["code"]}
+
+    elif name == "assign_entry_to_cost_center":
+        from .cost_centers import CostCenterManager
+        mgr = CostCenterManager(ledger)
+        entry = mgr.assign_entry(args["entry_id"], args["cost_center_code"])
+        return {"status": "assigned", "entry_id": entry.id, "cost_center": args["cost_center_code"]}
+
+    elif name == "unassign_entry_from_cost_center":
+        from .cost_centers import CostCenterManager
+        mgr = CostCenterManager(ledger)
+        entry = mgr.unassign_entry(args["entry_id"])
+        return {"status": "unassigned", "entry_id": entry.id}
+
+    elif name == "cost_center_report":
+        from .cost_centers import CostCenterManager
+        mgr = CostCenterManager(ledger)
+        report = mgr.report(
+            args["code"],
+            from_date=_parse_mcp_date(args.get("from_date")),
+            to_date=_parse_mcp_date(args.get("to_date")),
+        )
+        return report.to_dict()
+
+    elif name == "cost_center_summary":
+        from .cost_centers import CostCenterManager
+        mgr = CostCenterManager(ledger)
+        summary = mgr.summary(
+            from_date=_parse_mcp_date(args.get("from_date")),
+            to_date=_parse_mcp_date(args.get("to_date")),
+        )
+        return summary.to_dict()
+
+    elif name == "cost_center_hierarchy":
+        from .cost_centers import CostCenterManager
+        mgr = CostCenterManager(ledger)
+        tree = mgr.get_hierarchy(args.get("parent_code"))
+        return tree
+
+    # ── Period Comparison handlers ─────────────────────────────
+    elif name == "compare_account_balances":
+        from .comparison import compare_account_balances
+        raw_periods = args["periods"]
+        periods = [
+            (
+                _parse_mcp_date(p.get("from_date")),
+                _parse_mcp_date(p.get("to_date")),
+                p["label"],
+            )
+            for p in raw_periods
+        ]
+        report = compare_account_balances(ledger, periods)
+        return {
+            "periods": report.periods,
+            "metric": report.metric,
+            "rows": [
+                {
+                    "account_code": r.account_code,
+                    "account_name": r.account_name,
+                    "account_type": r.account_type.value,
+                    "period_values": r.period_values,
+                    "variance": r.variance,
+                    "variance_pct": r.variance_pct if r.variance_pct != float('inf') else None,
+                    "trend": r.trend,
+                }
+                for r in report.rows
+            ],
+            "total_rows": report.total_rows,
+        }
+
+    elif name == "compare_income_statements":
+        from .comparison import compare_income_statements
+        raw_periods = args["periods"]
+        periods = [
+            (
+                _parse_mcp_date(p.get("from_date")),
+                _parse_mcp_date(p.get("to_date")),
+                p["label"],
+            )
+            for p in raw_periods
+        ]
+        report = compare_income_statements(ledger, periods)
+
+        def _safe_pct(v):
+            return v if v != float('inf') else None
+
+        return {
+            "periods": report.periods,
+            "revenue_rows": [
+                {
+                    "account_code": r.account_code,
+                    "account_name": r.account_name,
+                    "period_values": r.period_values,
+                    "variance": r.variance,
+                    "variance_pct": _safe_pct(r.variance_pct),
+                    "trend": r.trend,
+                }
+                for r in report.revenue_rows
+            ],
+            "expense_rows": [
+                {
+                    "account_code": r.account_code,
+                    "account_name": r.account_name,
+                    "period_values": r.period_values,
+                    "variance": r.variance,
+                    "variance_pct": _safe_pct(r.variance_pct),
+                    "trend": r.trend,
+                }
+                for r in report.expense_rows
+            ],
+            "total_revenue": report.total_revenue,
+            "total_expenses": report.total_expenses,
+            "net_income": report.net_income,
+            "revenue_variance": report.revenue_variance,
+            "revenue_variance_pct": _safe_pct(report.revenue_variance_pct),
+            "expense_variance": report.expense_variance,
+            "expense_variance_pct": _safe_pct(report.expense_variance_pct),
+            "net_income_variance": report.net_income_variance,
+            "net_income_variance_pct": _safe_pct(report.net_income_variance_pct),
+        }
 
     else:
         raise LedgerError(f"Unknown tool: {name}")
