@@ -1001,6 +1001,133 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "aging_report",
+        "description": (
+            "Generate an AR or AP aging report showing outstanding balances "
+            "bucketed by age (0-30, 31-60, 61-90, 90+ days). Uses FIFO to "
+            "apply payments to the oldest entries first."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "account_codes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Account codes (e.g. ['ar'] or ['ap'])",
+                },
+                "report_type": {
+                    "type": "string",
+                    "enum": ["receivable", "payable"],
+                    "description": "Type of aging report",
+                },
+                "as_of": {"type": "string", "description": "ISO 8601 date for the report"},
+            },
+            "required": ["account_codes"],
+        },
+    },
+    {
+        "name": "create_fixed_asset",
+        "description": (
+            "Register a fixed asset for depreciation tracking. "
+            "Supports straight-line, declining balance, double-declining, "
+            "and units-of-production methods."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "asset_account": {"type": "string", "description": "Account code for the asset"},
+                "accum_dep_account": {"type": "string", "description": "Accumulated depreciation account"},
+                "dep_expense_account": {"type": "string", "description": "Depreciation expense account"},
+                "cost": {"type": "number", "description": "Acquisition cost"},
+                "salvage_value": {"type": "number", "description": "Estimated salvage value"},
+                "useful_life_months": {"type": "integer", "description": "Useful life in months"},
+                "method": {
+                    "type": "string",
+                    "enum": ["straight_line", "declining_balance", "double_declining", "units_of_production"],
+                },
+                "declining_rate": {"type": "number", "description": "Custom declining balance rate"},
+                "total_units": {"type": "number", "description": "Total units for units-of-production"},
+                "description": {"type": "string"},
+            },
+            "required": ["name", "asset_account", "accum_dep_account", "dep_expense_account", "cost"],
+        },
+    },
+    {
+        "name": "list_fixed_assets",
+        "description": "List all fixed assets, optionally filtered to active only.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "active_only": {"type": "boolean"},
+            },
+        },
+    },
+    {
+        "name": "get_fixed_asset",
+        "description": "Get details of a specific fixed asset including depreciation history.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "asset_id": {"type": "string"},
+            },
+            "required": ["asset_id"],
+        },
+    },
+    {
+        "name": "post_depreciation",
+        "description": (
+            "Post one period of depreciation for a fixed asset. "
+            "Creates a journal entry: Dr Depreciation Expense, Cr Accumulated Depreciation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "asset_id": {"type": "string"},
+            },
+            "required": ["asset_id"],
+        },
+    },
+    {
+        "name": "post_all_depreciation",
+        "description": (
+            "Post depreciation for all active, non-fully-depreciated assets. "
+            "Returns a summary of amounts posted per asset."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "depreciation_schedule",
+        "description": "Get the projected depreciation schedule for an asset.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "asset_id": {"type": "string"},
+                "periods": {"type": "integer", "description": "Number of periods to project"},
+            },
+            "required": ["asset_id"],
+        },
+    },
+    {
+        "name": "dispose_asset",
+        "description": (
+            "Dispose of a fixed asset. Records the removal of accumulated "
+            "depreciation and asset cost, plus any gain or loss on disposal."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "asset_id": {"type": "string"},
+                "disposal_value": {"type": "number", "description": "Amount received from disposal"},
+                "disposal_account": {"type": "string", "description": "Account to debit for proceeds"},
+            },
+            "required": ["asset_id"],
+        },
+    },
 ]
 
 
@@ -1814,6 +1941,143 @@ def _dispatch(ledger: Ledger, name: str, args: dict) -> Any:
             },
             "warnings": ratios.warnings,
         }
+
+    elif name == "aging_report":
+        from .aging import generate_aging_report, aging_summary_dict, AgingReportType
+        report_type = AgingReportType(args.get("report_type", "receivable"))
+        as_of = _parse_mcp_date(args.get("as_of"))
+        report = generate_aging_report(
+            ledger,
+            account_codes=args["account_codes"],
+            report_type=report_type,
+            as_of=as_of,
+        )
+        return aging_summary_dict(report)
+
+    elif name == "create_fixed_asset":
+        from .depreciation import DepreciationManager
+        dm = DepreciationManager(ledger)
+        asset = dm.create_asset(
+            name=args["name"],
+            asset_account=args["asset_account"],
+            accum_dep_account=args["accum_dep_account"],
+            dep_expense_account=args["dep_expense_account"],
+            cost=args["cost"],
+            salvage_value=args.get("salvage_value", 0),
+            useful_life_months=args.get("useful_life_months", 0),
+            method=args.get("method", "straight_line"),
+            declining_rate=args.get("declining_rate"),
+            total_units=args.get("total_units"),
+            description=args.get("description", ""),
+        )
+        return {
+            "id": asset.id,
+            "name": asset.name,
+            "cost": asset.cost,
+            "salvage_value": asset.salvage_value,
+            "book_value": asset.book_value,
+            "method": asset.method.value,
+            "useful_life_months": asset.useful_life_months,
+            "active": asset.active,
+        }
+
+    elif name == "list_fixed_assets":
+        from .depreciation import DepreciationManager
+        dm = DepreciationManager(ledger)
+        active_only = args.get("active_only", False)
+        assets = dm.list_assets(active_only=active_only)
+        return [
+            {
+                "id": a.id,
+                "name": a.name,
+                "cost": a.cost,
+                "accumulated_depreciation": a.accumulated_depreciation,
+                "book_value": a.book_value,
+                "method": a.method.value,
+                "active": a.active,
+                "months_depreciated": a.months_depreciated,
+            }
+            for a in assets
+        ]
+
+    elif name == "get_fixed_asset":
+        from .depreciation import DepreciationManager
+        dm = DepreciationManager(ledger)
+        asset = dm.get(args["asset_id"])
+        return {
+            "id": asset.id,
+            "name": asset.name,
+            "description": asset.description,
+            "cost": asset.cost,
+            "salvage_value": asset.salvage_value,
+            "depreciable_base": asset.depreciable_base,
+            "accumulated_depreciation": asset.accumulated_depreciation,
+            "book_value": asset.book_value,
+            "method": asset.method.value,
+            "useful_life_months": asset.useful_life_months,
+            "months_depreciated": asset.months_depreciated,
+            "remaining_life_months": asset.remaining_life_months,
+            "active": asset.active,
+            "is_fully_depreciated": asset.is_fully_depreciated,
+            "depreciation_history": [
+                {
+                    "date": h.date.isoformat() if h.date else None,
+                    "amount": h.amount,
+                    "period": h.period,
+                    "method": h.method.value,
+                }
+                for h in asset.depreciation_history
+            ],
+        }
+
+    elif name == "post_depreciation":
+        from .depreciation import DepreciationManager
+        dm = DepreciationManager(ledger)
+        dep = dm.post_depreciation(args["asset_id"])
+        if dep is None:
+            return {"status": "no_depreciation", "message": "Asset inactive or fully depreciated"}
+        return {
+            "status": "posted",
+            "amount": dep.amount,
+            "period": dep.period,
+            "method": dep.method.value,
+            "entry_id": dep.entry_id,
+        }
+
+    elif name == "post_all_depreciation":
+        from .depreciation import DepreciationManager
+        dm = DepreciationManager(ledger)
+        results = dm.post_all_depreciation()
+        total_posted = sum(r["amount"] for r in results if r["status"] == "posted")
+        return {
+            "results": results,
+            "total_posted": round(total_posted, 2),
+            "assets_processed": len(results),
+        }
+
+    elif name == "depreciation_schedule":
+        from .depreciation import DepreciationManager
+        dm = DepreciationManager(ledger)
+        asset = dm.get(args["asset_id"])
+        schedule = dm.get_schedule(args["asset_id"], periods=args.get("periods"))
+        return {
+            "asset_name": asset.name,
+            "method": asset.method.value,
+            "cost": asset.cost,
+            "salvage_value": asset.salvage_value,
+            "current_book_value": asset.book_value,
+            "schedule": schedule,
+        }
+
+    elif name == "dispose_asset":
+        from .depreciation import DepreciationManager
+        dm = DepreciationManager(ledger)
+        result = dm.dispose(
+            args["asset_id"],
+            disposal_value=args.get("disposal_value", 0),
+            disposal_account=args.get("disposal_account"),
+        )
+        return result
 
     else:
         raise LedgerError(f"Unknown tool: {name}")

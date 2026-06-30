@@ -1902,6 +1902,181 @@ def report_health(ctx, as_of):
             console.print(f"  [yellow]⚠[/yellow] {w}")
 
 
+# ── Aging Reports ────────────────────────────────────────────────
+
+@report.command("aging")
+@click.option("--accounts", "-a", required=True, help="Comma-separated account codes (e.g. 'ar' or 'ap')")
+@click.option("--type", "report_type", "-t", type=click.Choice(["receivable", "payable"]), default="receivable", help="Report type")
+@click.option("--as-of", "-d", default=None, help="As-of date (ISO 8601)")
+@click.option("--details", is_flag=True, help="Show individual items")
+@click.pass_context
+@handle_error
+def report_aging(ctx, accounts, report_type, as_of, details):
+    """Show AR/AP aging report."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .aging import generate_aging_report, format_aging_report, AgingReportType
+    as_of_dt = _parse_cli_date(as_of)
+    codes = [c.strip() for c in accounts.split(",")]
+    report = generate_aging_report(
+        ledger, codes, AgingReportType(report_type), as_of=as_of_dt
+    )
+    console.print(format_aging_report(report, show_details=details))
+
+
+# ── Depreciation / Fixed Assets ──────────────────────────────────
+
+@cli.group("asset")
+def asset():
+    """Manage fixed assets and depreciation."""
+    pass
+
+
+@asset.command("create")
+@click.option("--name", "-n", required=True, help="Asset name")
+@click.option("--asset-account", required=True, help="Asset account code")
+@click.option("--accum-account", required=True, help="Accumulated depreciation account code")
+@click.option("--expense-account", required=True, help="Depreciation expense account code")
+@click.option("--cost", "-c", type=float, required=True, help="Acquisition cost")
+@click.option("--salvage", "-s", type=float, default=0.0, help="Salvage value")
+@click.option("--life", "-l", type=int, required=True, help="Useful life in months")
+@click.option("--method", "-m", type=click.Choice(["straight_line", "declining_balance", "double_declining", "units_of_production"]), default="straight_line")
+@click.option("--rate", type=float, default=None, help="Custom declining balance rate")
+@click.option("--total-units", type=float, default=None, help="Total units (for units-of-production)")
+@click.option("--description", "-d", default="", help="Description")
+@click.pass_context
+@handle_error
+def asset_create(ctx, name, asset_account, accum_account, expense_account, cost, salvage, life, method, rate, total_units, description):
+    """Create a fixed asset for depreciation tracking."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .depreciation import DepreciationManager
+    dm = DepreciationManager(ledger)
+    asset = dm.create_asset(
+        name=name,
+        asset_account=asset_account,
+        accum_dep_account=accum_account,
+        dep_expense_account=expense_account,
+        cost=cost,
+        salvage_value=salvage,
+        useful_life_months=life,
+        method=method,
+        declining_rate=rate,
+        total_units=total_units,
+        description=description,
+    )
+    console.print(f"[green]✓[/green] Created asset: {asset.name}")
+    console.print(f"  ID: {asset.id}")
+    console.print(f"  Cost: {asset.cost:,.2f}")
+    console.print(f"  Book Value: {asset.book_value:,.2f}")
+
+
+@asset.command("list")
+@click.option("--active-only", is_flag=True, help="Show only active assets")
+@click.pass_context
+@handle_error
+def asset_list(ctx, active_only):
+    """List fixed assets."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .depreciation import DepreciationManager, format_asset_list
+    dm = DepreciationManager(ledger)
+    assets = dm.list_assets(active_only=active_only)
+    console.print(format_asset_list(assets))
+
+
+@asset.command("show")
+@click.argument("asset_id")
+@click.pass_context
+@handle_error
+def asset_show(ctx, asset_id):
+    """Show details of a fixed asset."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .depreciation import DepreciationManager, format_asset_detail
+    dm = DepreciationManager(ledger)
+    asset = dm.get(asset_id)
+    console.print(format_asset_detail(asset))
+
+
+@asset.command("depreciate")
+@click.argument("asset_id")
+@click.pass_context
+@handle_error
+def asset_depreciate(ctx, asset_id):
+    """Post one period of depreciation for an asset."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .depreciation import DepreciationManager
+    dm = DepreciationManager(ledger)
+    dep = dm.post_depreciation(asset_id)
+    if dep:
+        console.print(f"[green]✓[/green] Depreciation posted: {dep.amount:,.2f} ({dep.period})")
+    else:
+        console.print("[yellow]No depreciation posted (inactive or fully depreciated)[/yellow]")
+
+
+@asset.command("depreciate-all")
+@click.pass_context
+@handle_error
+def asset_depreciate_all(ctx):
+    """Post depreciation for all active assets."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .depreciation import DepreciationManager
+    dm = DepreciationManager(ledger)
+    results = dm.post_all_depreciation()
+    for r in results:
+        status_color = "green" if r["status"] == "posted" else "yellow"
+        console.print(
+            f"  [{status_color}]{r['status']}[/{status_color}] "
+            f"{r['asset_name']}: {r['amount']:,.2f}"
+        )
+
+
+@asset.command("schedule")
+@click.argument("asset_id")
+@click.option("--periods", "-p", type=int, default=None, help="Number of periods to project")
+@click.pass_context
+@handle_error
+def asset_schedule(ctx, asset_id, periods):
+    """Show projected depreciation schedule for an asset."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .depreciation import DepreciationManager, format_depreciation_schedule
+    dm = DepreciationManager(ledger)
+    asset_obj = dm.get(asset_id)
+    schedule = dm.get_schedule(asset_id, periods=periods)
+    console.print(format_depreciation_schedule(schedule, asset_obj.name))
+
+
+@asset.command("dispose")
+@click.argument("asset_id")
+@click.option("--value", "-v", type=float, default=0.0, help="Disposal proceeds")
+@click.option("--account", "-a", default=None, help="Account to debit for proceeds")
+@click.pass_context
+@handle_error
+def asset_dispose(ctx, asset_id, value, account):
+    """Dispose of a fixed asset."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .depreciation import DepreciationManager
+    dm = DepreciationManager(ledger)
+    result = dm.dispose(asset_id, disposal_value=value, disposal_account=account)
+    gain_loss_color = "green" if result["gain"] else "red"
+    gain_loss_word = "Gain" if result["gain"] else "Loss"
+    console.print(f"[green]✓[/green] Disposed: {result['asset_name']}")
+    console.print(f"  Book Value: {result['book_value']:,.2f}")
+    console.print(f"  Disposal Value: {result['disposal_value']:,.2f}")
+    console.print(f"  {gain_loss_word}: [{gain_loss_color}]{abs(result['gain_or_loss']):,.2f}[/{gain_loss_color}]")
+
+
+@asset.command("delete")
+@click.argument("asset_id")
+@click.confirmation_option(prompt="Delete this asset record?")
+@click.pass_context
+@handle_error
+def asset_delete(ctx, asset_id):
+    """Delete a fixed asset record."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .depreciation import DepreciationManager
+    dm = DepreciationManager(ledger)
+    dm.delete(asset_id)
+    console.print("[green]✓[/green] Asset deleted.")
+
+
 # ── Serve Command (MCP) ─────────────────────────────────────────
 
 @cli.command("serve")
