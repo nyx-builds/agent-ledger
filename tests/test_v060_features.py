@@ -554,8 +554,8 @@ class TestSQLiteLedgerIntegration:
         balance = ledger.get_account_balance("cash")
         assert balance.balance == 1000.0
 
-        # Search
-        results = ledger.search_entries("Transaction 00")
+        # Search — "Transaction 000" matches 0000-0009 only
+        results = ledger.search_entries("Transaction 000")
         assert len(results) == 10  # 0000-0009
 
     def test_sqlite_account_deletion(self, tmp_dir):

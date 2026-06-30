@@ -986,6 +986,190 @@ def create_app(ledger_path: str = "ledger.json") -> FastAPI:
         accounts = ledger.list_accounts(tag=tag)
         return [_account_to_dict(a) for a in accounts]
 
+    # ── v0.7.0: Recurring Entries ────────────────────────────────
+
+    class RecurringLineRequest(PydanticModel):
+        account_code: str
+        debit: float = Field(default=0.0, ge=0)
+        credit: float = Field(default=0.0, ge=0)
+
+    class CreateRecurringRequest(PydanticModel):
+        name: str = Field(..., min_length=1)
+        description: str = Field(default="")
+        lines: list[RecurringLineRequest] = Field(..., min_length=2)
+        schedule_type: str = Field(default="monthly")
+        interval: int = Field(default=1, ge=1)
+        day_of_month: int = Field(default=1, ge=1, le=31)
+        day_of_week: int = Field(default=0, ge=0, le=6)
+        month_of_year: int = Field(default=1, ge=1, le=12)
+        start_date: Optional[str] = None
+        end_date: Optional[str] = None
+        max_occurrences: Optional[int] = None
+        tags: list[str] = Field(default_factory=list)
+
+    @app.post("/recurring", status_code=201)
+    async def create_recurring(req: CreateRecurringRequest):
+        ledger = get_ledger()
+        from .recurring import RecurringManager
+        rm = RecurringManager(ledger)
+        try:
+            template = rm.create(
+                name=req.name,
+                description=req.description,
+                lines=[l.model_dump() for l in req.lines],
+                schedule_type=req.schedule_type,
+                interval=req.interval,
+                day_of_month=req.day_of_month,
+                day_of_week=req.day_of_week,
+                month_of_year=req.month_of_year,
+                start_date=_parse_date(req.start_date),
+                end_date=_parse_date(req.end_date),
+                max_occurrences=req.max_occurrences,
+                tags=req.tags or None,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {
+            "id": template.id,
+            "name": template.name,
+            "schedule_type": template.schedule_type.value,
+            "active": template.active,
+            "next_run": template.next_run.isoformat() if template.next_run else None,
+        }
+
+    @app.get("/recurring")
+    async def list_recurring(active_only: bool = Query(False)):
+        ledger = get_ledger()
+        from .recurring import RecurringManager
+        rm = RecurringManager(ledger)
+        templates = rm.list_templates(active_only=active_only)
+        return [
+            {
+                "id": t.id,
+                "name": t.name,
+                "schedule_type": t.schedule_type.value,
+                "active": t.active,
+                "occurrences_created": t.occurrences_created,
+                "next_run": t.next_run.isoformat() if t.next_run else None,
+            }
+            for t in templates
+        ]
+
+    @app.get("/recurring/{template_id}")
+    async def get_recurring(template_id: str):
+        ledger = get_ledger()
+        from .recurring import RecurringManager
+        rm = RecurringManager(ledger)
+        try:
+            t = rm.get(template_id)
+        except Exception:
+            raise HTTPException(status_code=404, detail=f"Template '{template_id}' not found")
+        return {
+            "id": t.id,
+            "name": t.name,
+            "description": t.description,
+            "schedule_type": t.schedule_type.value,
+            "active": t.active,
+            "lines": [
+                {"account_code": l.account_code, "debit": l.debit, "credit": l.credit}
+                for l in t.lines
+            ],
+            "next_run": t.next_run.isoformat() if t.next_run else None,
+        }
+
+    @app.post("/recurring/{template_id}/pause")
+    async def pause_recurring(template_id: str):
+        ledger = get_ledger()
+        from .recurring import RecurringManager
+        rm = RecurringManager(ledger)
+        try:
+            t = rm.pause(template_id)
+        except Exception:
+            raise HTTPException(status_code=404, detail=f"Template '{template_id}' not found")
+        return {"id": t.id, "active": t.active}
+
+    @app.post("/recurring/{template_id}/resume")
+    async def resume_recurring(template_id: str):
+        ledger = get_ledger()
+        from .recurring import RecurringManager
+        rm = RecurringManager(ledger)
+        try:
+            t = rm.resume(template_id)
+        except Exception:
+            raise HTTPException(status_code=404, detail=f"Template '{template_id}' not found")
+        return {"id": t.id, "active": t.active}
+
+    @app.delete("/recurring/{template_id}")
+    async def delete_recurring(template_id: str):
+        ledger = get_ledger()
+        from .recurring import RecurringManager
+        rm = RecurringManager(ledger)
+        try:
+            rm.delete(template_id)
+        except Exception:
+            raise HTTPException(status_code=404, detail=f"Template '{template_id}' not found")
+        return {"deleted": True}
+
+    @app.post("/recurring/process")
+    async def process_recurring():
+        ledger = get_ledger()
+        from .recurring import RecurringManager
+        rm = RecurringManager(ledger)
+        results = rm.process_all()
+        return {
+            "processed": len(results),
+            "generated": sum(1 for r in results if r["status"] == "generated"),
+            "results": results,
+        }
+
+    # ── v0.7.0: Financial Ratios ─────────────────────────────────
+
+    @app.get("/reports/ratios")
+    async def get_ratios(
+        as_of: Optional[str] = Query(None, description="ISO 8601 date"),
+        cash_tags: Optional[str] = Query(None, description="Comma-separated tags for cash accounts"),
+        inventory_tags: Optional[str] = Query(None, description="Comma-separated tags for inventory"),
+        current_tags: Optional[str] = Query(None, description="Comma-separated tags for current accounts"),
+    ):
+        ledger = get_ledger()
+        from .ratios import compute_ratios
+        ratios = compute_ratios(
+            ledger,
+            as_of=_parse_date(as_of),
+            cash_tags=set(cash_tags.split(",")) if cash_tags else None,
+            inventory_tags=set(inventory_tags.split(",")) if inventory_tags else None,
+            current_tags=set(current_tags.split(",")) if current_tags else None,
+        )
+        return {
+            "total_assets": ratios.total_assets,
+            "total_liabilities": ratios.total_liabilities,
+            "total_equity": ratios.total_equity,
+            "net_income": ratios.net_income,
+            "working_capital": ratios.working_capital,
+            "current_ratio": ratios.current_ratio,
+            "quick_ratio": ratios.quick_ratio,
+            "cash_ratio": ratios.cash_ratio,
+            "debt_to_equity": ratios.debt_to_equity,
+            "profit_margin": ratios.profit_margin,
+            "return_on_assets": ratios.return_on_assets,
+            "return_on_equity": ratios.return_on_equity,
+            "asset_turnover": ratios.asset_turnover,
+            "warnings": ratios.warnings,
+        }
+
+    @app.get("/reports/health")
+    async def get_health(as_of: Optional[str] = Query(None)):
+        ledger = get_ledger()
+        from .ratios import compute_ratios, get_financial_health
+        ratios = compute_ratios(ledger, as_of=_parse_date(as_of))
+        health = get_financial_health(ratios)
+        return {
+            "health": health,
+            "net_income": ratios.net_income,
+            "working_capital": ratios.working_capital,
+            "warnings": ratios.warnings,
+        }
+
     return app
 
 

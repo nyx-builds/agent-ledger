@@ -203,18 +203,64 @@ class Ledger:
     def post_entry(
         self,
         description: str,
-        lines: list[JournalLine],
+        lines: list,
         tags: Optional[list[str]] = None,
         timestamp: Optional[datetime] = None,
         metadata: Optional[dict] = None,
     ) -> JournalEntry:
         """Post a new journal entry.
 
+        Accepts ``JournalLine`` objects **or** a convenient tuple shorthand::
+
+            ledger.post_entry("Sale", [
+                ("cash", 1000.0, 0.0),      # (account, debit, credit)
+                ("revenue", 0.0, 1000.0),
+            ])
+
+        2-tuples ``(account, amount)`` are also accepted — the amount is
+        interpreted as a debit. Use negative values for credits, or just
+        use explicit 3-tuples.
+
         Validates:
         - All referenced accounts exist
         - Entry balances (debits = credits)
         - Currency consistency (all accounts in same currency unless rates exist)
         """
+        # Coerce tuple shorthand to JournalLine objects
+        normalised: list[JournalLine] = []
+        for line in lines:
+            if isinstance(line, JournalLine):
+                normalised.append(line)
+            elif isinstance(line, (tuple, list)):
+                if len(line) == 3:
+                    account_code, debit, credit = line
+                    normalised.append(JournalLine(
+                        account_code=account_code,
+                        debit=float(debit),
+                        credit=float(credit),
+                    ))
+                elif len(line) == 2:
+                    account_code, amount = line
+                    if amount >= 0:
+                        normalised.append(JournalLine(
+                            account_code=account_code,
+                            debit=float(amount),
+                        ))
+                    else:
+                        normalised.append(JournalLine(
+                            account_code=account_code,
+                            credit=float(-amount),
+                        ))
+                else:
+                    raise ValueError(
+                        f"Tuple line must have 2 or 3 elements, got {len(line)}: {line}"
+                    )
+            else:
+                raise TypeError(
+                    f"Each line must be a JournalLine or tuple, got {type(line).__name__}"
+                )
+        lines = normalised
+
         # Validate accounts exist
         for line in lines:
             self.get_account(line.account_code)

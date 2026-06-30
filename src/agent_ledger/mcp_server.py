@@ -857,6 +857,150 @@ TOOLS = [
             "required": ["tag"],
         },
     },
+
+    # ── v0.7.0: Recurring Entries ──────────────────────────────
+
+    {
+        "name": "create_recurring_entry",
+        "description": (
+            "Create a recurring journal entry template that auto-generates entries "
+            "on a schedule (daily, weekly, monthly, quarterly, yearly). Lines must balance."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Template name"},
+                "description": {"type": "string", "description": "Description for generated entries"},
+                "lines": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "account_code": {"type": "string"},
+                            "debit": {"type": "number"},
+                            "credit": {"type": "number"},
+                        },
+                        "required": ["account_code"],
+                    },
+                    "minItems": 2,
+                    "description": "Template lines (must balance)",
+                },
+                "schedule_type": {
+                    "type": "string",
+                    "enum": ["daily", "weekly", "monthly", "quarterly", "yearly"],
+                    "description": "Schedule type",
+                },
+                "interval": {"type": "integer", "description": "Every N periods (default 1)"},
+                "day_of_month": {"type": "integer", "description": "Day of month (1-31)"},
+                "day_of_week": {"type": "integer", "description": "Weekday 0=Mon"},
+                "month_of_year": {"type": "integer", "description": "Month 1-12 for yearly"},
+                "start_date": {"type": "string", "description": "ISO 8601 start date"},
+                "end_date": {"type": "string", "description": "ISO 8601 end date"},
+                "max_occurrences": {"type": "integer", "description": "Max entries to generate"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["name", "description", "lines"],
+        },
+    },
+    {
+        "name": "list_recurring_entries",
+        "description": "List recurring entry templates, optionally filtered to active only.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "active_only": {"type": "boolean", "description": "Only show active templates"},
+            },
+        },
+    },
+    {
+        "name": "get_recurring_entry",
+        "description": "Get details of a specific recurring entry template.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "template_id": {"type": "string", "description": "Template ID"},
+            },
+            "required": ["template_id"],
+        },
+    },
+    {
+        "name": "pause_recurring_entry",
+        "description": "Pause a recurring entry template (stops generation).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "template_id": {"type": "string"},
+            },
+            "required": ["template_id"],
+        },
+    },
+    {
+        "name": "resume_recurring_entry",
+        "description": "Resume a paused recurring entry template.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "template_id": {"type": "string"},
+            },
+            "required": ["template_id"],
+        },
+    },
+    {
+        "name": "delete_recurring_entry",
+        "description": "Delete a recurring entry template.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "template_id": {"type": "string"},
+            },
+            "required": ["template_id"],
+        },
+    },
+    {
+        "name": "process_recurring_entries",
+        "description": (
+            "Process all due recurring templates — generates journal entries for "
+            "any template whose next_run is in the past. Use this to catch up on "
+            "scheduled entries."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+
+    # ── v0.7.0: Financial Ratios ───────────────────────────────
+
+    {
+        "name": "financial_ratios",
+        "description": (
+            "Compute standard financial ratios and KPIs: current ratio, quick ratio, "
+            "cash ratio, debt-to-equity, debt-to-assets, profit margin, ROA, ROE, "
+            "operating margin, asset turnover, working capital."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "as_of": {"type": "string", "description": "ISO 8601 date for point-in-time ratios"},
+                "cash_tags": {"type": "array", "items": {"type": "string"}, "description": "Tags for cash accounts"},
+                "inventory_tags": {"type": "array", "items": {"type": "string"}, "description": "Tags for inventory accounts"},
+                "current_tags": {"type": "array", "items": {"type": "string"}, "description": "Tags for current accounts"},
+            },
+        },
+    },
+    {
+        "name": "financial_health",
+        "description": (
+            "Assess financial health across liquidity, solvency, and profitability. "
+            "Returns status indicators (healthy/adequate/at_risk) for each category."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "as_of": {"type": "string", "description": "ISO 8601 date"},
+            },
+        },
+    },
 ]
 
 
@@ -1529,6 +1673,147 @@ def _dispatch(ledger: Ledger, name: str, args: dict) -> Any:
             }
             for a in accounts
         ]
+
+    # ── v0.7.0: Recurring Entries ──────────────────────────────
+
+    elif name == "create_recurring_entry":
+        from .recurring import RecurringManager
+        rm = RecurringManager(ledger)
+        sd = _parse_mcp_date(args.get("start_date"))
+        ed = _parse_mcp_date(args.get("end_date"))
+        template = rm.create(
+            name=args["name"],
+            description=args["description"],
+            lines=args["lines"],
+            schedule_type=args.get("schedule_type", "monthly"),
+            interval=args.get("interval", 1),
+            day_of_month=args.get("day_of_month", 1),
+            day_of_week=args.get("day_of_week", 0),
+            month_of_year=args.get("month_of_year", 1),
+            start_date=sd,
+            end_date=ed,
+            max_occurrences=args.get("max_occurrences"),
+            tags=args.get("tags"),
+        )
+        return {
+            "id": template.id,
+            "name": template.name,
+            "schedule_type": template.schedule_type.value,
+            "interval": template.interval,
+            "active": template.active,
+            "next_run": template.next_run.isoformat() if template.next_run else None,
+            "lines": len(template.lines),
+        }
+
+    elif name == "list_recurring_entries":
+        from .recurring import RecurringManager
+        rm = RecurringManager(ledger)
+        templates = rm.list_templates(active_only=args.get("active_only", False))
+        return [
+            {
+                "id": t.id,
+                "name": t.name,
+                "description": t.description,
+                "schedule_type": t.schedule_type.value,
+                "interval": t.interval,
+                "active": t.active,
+                "occurrences_created": t.occurrences_created,
+                "last_run": t.last_run.isoformat() if t.last_run else None,
+                "next_run": t.next_run.isoformat() if t.next_run else None,
+            }
+            for t in templates
+        ]
+
+    elif name == "get_recurring_entry":
+        from .recurring import RecurringManager
+        rm = RecurringManager(ledger)
+        t = rm.get(args["template_id"])
+        return {
+            "id": t.id,
+            "name": t.name,
+            "description": t.description,
+            "schedule_type": t.schedule_type.value,
+            "interval": t.interval,
+            "day_of_month": t.day_of_month,
+            "day_of_week": t.day_of_week,
+            "month_of_year": t.month_of_year,
+            "start_date": t.start_date.isoformat() if t.start_date else None,
+            "end_date": t.end_date.isoformat() if t.end_date else None,
+            "max_occurrences": t.max_occurrences,
+            "active": t.active,
+            "occurrences_created": t.occurrences_created,
+            "last_run": t.last_run.isoformat() if t.last_run else None,
+            "next_run": t.next_run.isoformat() if t.next_run else None,
+            "tags": t.tags,
+            "lines": [
+                {
+                    "account_code": l.account_code,
+                    "debit": l.debit,
+                    "credit": l.credit,
+                    "description": l.description,
+                }
+                for l in t.lines
+            ],
+        }
+
+    elif name == "pause_recurring_entry":
+        from .recurring import RecurringManager
+        rm = RecurringManager(ledger)
+        t = rm.pause(args["template_id"])
+        return {"id": t.id, "active": t.active}
+
+    elif name == "resume_recurring_entry":
+        from .recurring import RecurringManager
+        rm = RecurringManager(ledger)
+        t = rm.resume(args["template_id"])
+        return {"id": t.id, "active": t.active}
+
+    elif name == "delete_recurring_entry":
+        from .recurring import RecurringManager
+        rm = RecurringManager(ledger)
+        rm.delete(args["template_id"])
+        return {"deleted": True, "template_id": args["template_id"]}
+
+    elif name == "process_recurring_entries":
+        from .recurring import RecurringManager
+        rm = RecurringManager(ledger)
+        results = rm.process_all()
+        return {
+            "processed": len(results),
+            "generated": sum(1 for r in results if r["status"] == "generated"),
+            "results": results,
+        }
+
+    # ── v0.7.0: Financial Ratios ───────────────────────────────
+
+    elif name == "financial_ratios":
+        from .ratios import compute_ratios, format_ratios
+        as_of = _parse_mcp_date(args.get("as_of"))
+        ratios = compute_ratios(
+            ledger,
+            as_of=as_of,
+            cash_tags=set(args["cash_tags"]) if "cash_tags" in args else None,
+            inventory_tags=set(args["inventory_tags"]) if "inventory_tags" in args else None,
+            current_tags=set(args["current_tags"]) if "current_tags" in args else None,
+        )
+        return format_ratios(ratios)
+
+    elif name == "financial_health":
+        from .ratios import compute_ratios, get_financial_health, format_ratios
+        as_of = _parse_mcp_date(args.get("as_of"))
+        ratios = compute_ratios(ledger, as_of=as_of)
+        health = get_financial_health(ratios)
+        return {
+            "health": health,
+            "summary": {
+                "total_assets": ratios.total_assets,
+                "total_liabilities": ratios.total_liabilities,
+                "total_equity": ratios.total_equity,
+                "net_income": ratios.net_income,
+                "working_capital": ratios.working_capital,
+            },
+            "warnings": ratios.warnings,
+        }
 
     else:
         raise LedgerError(f"Unknown tool: {name}")

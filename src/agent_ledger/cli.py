@@ -1674,6 +1674,234 @@ def account_list_by_tag(ctx, tag):
     console.print(table)
 
 
+# ── v0.7.0: Recurring Entries ──────────────────────────────────
+
+@cli.group("recurring")
+def recurring():
+    """Manage recurring journal entries."""
+    pass
+
+
+@recurring.command("create")
+@click.argument("name")
+@click.argument("description")
+@click.argument("lines", nargs=-1, required=True)
+@click.option("--schedule", "-s", default="monthly",
+              type=click.Choice(["daily", "weekly", "monthly", "quarterly", "yearly"]),
+              help="Schedule type")
+@click.option("--interval", "-i", type=int, default=1, help="Every N periods")
+@click.option("--day-of-month", "-d", type=int, default=1, help="Day of month (1-31)")
+@click.option("--day-of-week", "-w", type=int, default=0, help="Day of week (0=Mon)")
+@click.option("--month-of-year", "-m", type=int, default=1, help="Month (1-12) for yearly")
+@click.option("--start-date", default=None, help="Start date (ISO 8601)")
+@click.option("--end-date", default=None, help="End date (ISO 8601)")
+@click.option("--max-occurrences", type=int, default=None, help="Max number of entries")
+@click.option("--tag", "-t", multiple=True, help="Tags for generated entries")
+@click.pass_context
+@handle_error
+def recurring_create(ctx, name, description, lines, schedule, interval,
+                     day_of_month, day_of_week, month_of_year,
+                     start_date, end_date, max_occurrences, tag):
+    """Create a recurring entry template.
+
+    LINES are account:debit:credit triples, e.g. rent:2000:0 cash:0:2000
+    """
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .recurring import RecurringManager
+
+    # Parse lines: account:debit:credit
+    line_dicts = []
+    for l in lines:
+        parts = l.split(":")
+        if len(parts) != 3:
+            click.echo(f"Error: line '{l}' must be account:debit:credit", err=True)
+            sys.exit(1)
+        line_dicts.append({
+            "account_code": parts[0],
+            "debit": float(parts[1]),
+            "credit": float(parts[2]),
+        })
+
+    rm = RecurringManager(ledger)
+    sd = _parse_cli_date(start_date)
+    ed = _parse_cli_date(end_date)
+    template = rm.create(
+        name=name,
+        description=description,
+        lines=line_dicts,
+        schedule_type=schedule,
+        interval=interval,
+        day_of_month=day_of_month,
+        day_of_week=day_of_week,
+        month_of_year=month_of_year,
+        start_date=sd,
+        end_date=ed,
+        max_occurrences=max_occurrences,
+        tags=list(tag) if tag else None,
+    )
+    console.print(f"[green]✓[/green] Created recurring template: {template.name}")
+    console.print(f"  ID: {template.id}")
+    console.print(f"  Schedule: {template.schedule_type.value} (interval={template.interval})")
+    if template.next_run:
+        console.print(f"  Next run: {template.next_run.strftime('%Y-%m-%d %H:%M')}")
+
+
+@recurring.command("list")
+@click.option("--active-only", is_flag=True, help="Show only active templates")
+@click.pass_context
+@handle_error
+def recurring_list(ctx, active_only):
+    """List recurring entry templates."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .recurring import RecurringManager, format_recurring_list
+    rm = RecurringManager(ledger)
+    templates = rm.list_templates(active_only=active_only)
+    console.print(format_recurring_list(templates))
+
+
+@recurring.command("show")
+@click.argument("template_id")
+@click.pass_context
+@handle_error
+def recurring_show(ctx, template_id):
+    """Show details of a recurring template."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .recurring import RecurringManager, format_recurring_detail
+    rm = RecurringManager(ledger)
+    template = rm.get(template_id)
+    console.print(format_recurring_detail(template))
+
+
+@recurring.command("pause")
+@click.argument("template_id")
+@click.pass_context
+@handle_error
+def recurring_pause(ctx, template_id):
+    """Pause a recurring template."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .recurring import RecurringManager
+    rm = RecurringManager(ledger)
+    rm.pause(template_id)
+    console.print(f"[yellow]⏸[/yellow] Paused template {template_id}")
+
+
+@recurring.command("resume")
+@click.argument("template_id")
+@click.pass_context
+@handle_error
+def recurring_resume(ctx, template_id):
+    """Resume a paused recurring template."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .recurring import RecurringManager
+    rm = RecurringManager(ledger)
+    rm.resume(template_id)
+    console.print(f"[green]▶[/green] Resumed template {template_id}")
+
+
+@recurring.command("delete")
+@click.argument("template_id")
+@click.pass_context
+@handle_error
+def recurring_delete(ctx, template_id):
+    """Delete a recurring template."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .recurring import RecurringManager
+    rm = RecurringManager(ledger)
+    rm.delete(template_id)
+    console.print(f"[red]✗[/red] Deleted template {template_id}")
+
+
+@recurring.command("process")
+@click.option("--dry-run", is_flag=True, help="Show what would be generated without posting")
+@click.pass_context
+@handle_error
+def recurring_process(ctx, dry_run):
+    """Process all due recurring templates."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .recurring import RecurringManager
+    rm = RecurringManager(ledger)
+
+    if dry_run:
+        due = [t for t in rm.list_templates(active_only=True) if rm.is_due(t)]
+        if not due:
+            console.print("[dim]No templates are due.[/dim]")
+            return
+        console.print(f"[cyan]{len(due)} template(s) due:[/cyan]")
+        for t in due:
+            console.print(f"  • {t.name} (next_run: {t.next_run.strftime('%Y-%m-%d') if t.next_run else 'N/A'})")
+        return
+
+    results = rm.process_all()
+    generated = [r for r in results if r["status"] == "generated"]
+    if generated:
+        console.print(f"[green]✓[/green] Generated {len(generated)} entr(y/ies):")
+        for r in generated:
+            console.print(f"  • {r['template_name']} → entry {r['entry_id']}")
+    else:
+        console.print("[dim]No templates were due.[/dim]")
+
+
+# ── v0.7.0: Financial Ratios ────────────────────────────────────
+
+@report.command("ratios")
+@click.option("--as-of", "-a", default=None, help="As-of date (ISO 8601)")
+@click.pass_context
+@handle_error
+def report_ratios(ctx, as_of):
+    """Show financial ratios and KPIs."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .ratios import compute_ratios, format_ratios
+    as_of_dt = _parse_cli_date(as_of)
+    ratios = compute_ratios(ledger, as_of=as_of_dt)
+    console.print(format_ratios(ratios))
+
+
+@report.command("health")
+@click.option("--as-of", "-a", default=None, help="As-of date (ISO 8601)")
+@click.pass_context
+@handle_error
+def report_health(ctx, as_of):
+    """Show financial health assessment."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .ratios import compute_ratios, get_financial_health
+    as_of_dt = _parse_cli_date(as_of)
+    ratios = compute_ratios(ledger, as_of=as_of_dt)
+    health = get_financial_health(ratios)
+
+    console.print("[cyan]FINANCIAL HEALTH ASSESSMENT[/cyan]")
+    console.print()
+
+    status_colors = {
+        "healthy": "green",
+        "adequate": "yellow",
+        "marginal": "yellow",
+        "at_risk": "red",
+    }
+    status_icons = {
+        "healthy": "✓",
+        "adequate": "○",
+        "marginal": "⚠",
+        "at_risk": "✗",
+    }
+
+    if not health:
+        console.print("[dim]Insufficient data for health assessment.[/dim]")
+        return
+
+    for category, info in health.items():
+        status = info["status"]
+        color = status_colors.get(status, "white")
+        icon = status_icons.get(status, "?")
+        console.print(f"  [{color}]{icon}[/{color}] {category.title()}: {status}")
+
+    console.print()
+
+    if ratios.warnings:
+        console.print("[dim]Warnings:[/dim]")
+        for w in ratios.warnings:
+            console.print(f"  [yellow]⚠[/yellow] {w}")
+
+
 # ── Serve Command (MCP) ─────────────────────────────────────────
 
 @cli.command("serve")
