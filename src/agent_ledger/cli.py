@@ -796,6 +796,141 @@ def export_hierarchy(ctx, output):
         console.print(csv_content)
 
 
+# ── Wallet Commands ──────────────────────────────────────────────
+
+@cli.group("wallet")
+def wallet():
+    """Connect and sync Solana wallet transactions."""
+    pass
+
+
+@wallet.command("connect")
+@click.argument("address")
+@click.option("--network", "-n", default="mainnet",
+              type=click.Choice(["mainnet", "devnet"]),
+              help="Solana network")
+@click.pass_context
+@handle_error
+def wallet_connect(ctx, address, network):
+    """Connect a Solana wallet and check balance."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .importer import WalletImporter
+    importer = WalletImporter(ledger=ledger)
+    try:
+        info = importer.connect_wallet(address, network=network)
+        console.print(Panel(
+            f"[cyan]Address:[/cyan] {info.address}\n"
+            f"[cyan]Network:[/cyan] {info.network}\n"
+            f"[cyan]Balance:[/cyan] {info.sol_balance:.6f} SOL\n"
+            f"[cyan]Transactions Imported:[/cyan] {info.transaction_count}\n"
+            f"[cyan]Last Synced:[/cyan] {info.last_synced_at.strftime('%Y-%m-%d %H:%M UTC') if info.last_synced_at else 'Never'}",
+            title="Wallet Connected",
+        ))
+    except Exception as e:
+        console.print(f"[red]Failed to connect wallet:[/red] {e}")
+    finally:
+        importer.close()
+
+
+@wallet.command("sync")
+@click.argument("address")
+@click.option("--network", "-n", default="mainnet",
+              type=click.Choice(["mainnet", "devnet"]),
+              help="Solana network")
+@click.option("--limit", "-l", default=50, help="Max transactions to fetch")
+@click.option("--no-accounts", is_flag=True, help="Don't auto-create accounts")
+@click.option("--no-fees", is_flag=True, help="Don't create separate fee entries")
+@click.option("--dry-run", is_flag=True, help="Categorize without posting")
+@click.pass_context
+@handle_error
+def wallet_sync(ctx, address, network, limit, no_accounts, no_fees, dry_run):
+    """Sync wallet transactions into the ledger as journal entries."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .importer import WalletImporter
+    importer = WalletImporter(ledger=ledger)
+    try:
+        result = importer.sync_wallet(
+            wallet_address=address,
+            network=network,
+            limit=limit,
+            create_accounts=not no_accounts,
+            import_fees=not no_fees,
+            dry_run=dry_run,
+        )
+
+        if dry_run:
+            console.print("[yellow]DRY RUN — no entries were posted[/yellow]")
+
+        console.print(Panel(
+            f"[cyan]Wallet:[/cyan] {result.wallet_address}\n"
+            f"[cyan]Fetched:[/cyan] {result.transactions_fetched}\n"
+            f"[green]Imported:[/green] {result.transactions_imported}\n"
+            f"[yellow]Skipped:[/yellow] {result.transactions_skipped}\n"
+            f"[red]Failed:[/red] {result.transactions_failed}\n"
+            f"[cyan]Total SOL:[/cyan] {result.total_sol_imported:.6f}",
+            title="Wallet Sync Results",
+        ))
+
+        if result.errors:
+            console.print("\n[red]Errors:[/red]")
+            for err in result.errors[:5]:
+                console.print(f"  • {err}")
+
+    except Exception as e:
+        console.print(f"[red]Sync failed:[/red] {e}")
+    finally:
+        importer.close()
+
+
+@wallet.command("status")
+@click.argument("address")
+@click.option("--network", "-n", default="mainnet",
+              type=click.Choice(["mainnet", "devnet"]),
+              help="Solana network")
+@click.pass_context
+@handle_error
+def wallet_status(ctx, address, network):
+    """Show wallet sync status and balance."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .importer import WalletImporter
+    importer = WalletImporter(ledger=ledger)
+    try:
+        info = importer.get_wallet_info(address, network=network)
+        console.print(Panel(
+            f"[cyan]Address:[/cyan] {info.address}\n"
+            f"[cyan]Network:[/cyan] {info.network}\n"
+            f"[cyan]Balance:[/cyan] {info.sol_balance:.6f} SOL ({info.lamports:,} lamports)\n"
+            f"[cyan]Last Synced Slot:[/cyan] {info.last_synced_slot or 'Never'}\n"
+            f"[cyan]Last Synced At:[/cyan] {info.last_synced_at.strftime('%Y-%m-%d %H:%M UTC') if info.last_synced_at else 'Never'}\n"
+            f"[cyan]Transactions Imported:[/cyan] {info.transaction_count}",
+            title="Wallet Status",
+        ))
+    except Exception as e:
+        console.print(f"[red]Failed to get wallet status:[/red] {e}")
+    finally:
+        importer.close()
+
+
+@wallet.command("setup-accounts")
+@click.pass_context
+@handle_error
+def wallet_setup_accounts(ctx):
+    """Create the default chart of accounts for Solana wallet tracking."""
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    from .importer import WalletImporter
+    importer = WalletImporter(ledger=ledger)
+    try:
+        created = importer.setup_wallet_accounts()
+        if created:
+            console.print(f"[green]✓[/green] Created {len(created)} accounts:")
+            for code in created:
+                console.print(f"  • {code}")
+        else:
+            console.print("[yellow]All wallet accounts already exist[/yellow]")
+    finally:
+        importer.close()
+
+
 # ── Serve Command (MCP) ─────────────────────────────────────────
 
 @cli.command("serve")

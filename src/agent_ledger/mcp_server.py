@@ -334,6 +334,96 @@ TOOLS = [
             "properties": {},
         },
     },
+    # ── v0.3.0 Wallet Tools ──────────────────────────────────────
+    {
+        "name": "wallet_connect",
+        "description": "Connect a Solana wallet and check its balance",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "address": {
+                    "type": "string",
+                    "description": "Solana wallet address (base58)",
+                },
+                "network": {
+                    "type": "string",
+                    "enum": ["mainnet", "devnet"],
+                    "description": "Solana network",
+                    "default": "mainnet",
+                },
+            },
+            "required": ["address"],
+        },
+    },
+    {
+        "name": "wallet_sync",
+        "description": "Sync Solana wallet transactions into the ledger as journal entries. "
+                       "Fetches on-chain transactions, categorizes them, and creates double-entry journal entries.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "address": {
+                    "type": "string",
+                    "description": "Solana wallet address",
+                },
+                "network": {
+                    "type": "string",
+                    "enum": ["mainnet", "devnet"],
+                    "description": "Solana network",
+                    "default": "mainnet",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max transactions to fetch",
+                    "default": 50,
+                },
+                "create_accounts": {
+                    "type": "boolean",
+                    "description": "Auto-create missing ledger accounts",
+                    "default": True,
+                },
+                "import_fees": {
+                    "type": "boolean",
+                    "description": "Create separate fee entries",
+                    "default": True,
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Categorize without posting entries",
+                    "default": False,
+                },
+            },
+            "required": ["address"],
+        },
+    },
+    {
+        "name": "wallet_status",
+        "description": "Get wallet sync status and current balance",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "address": {
+                    "type": "string",
+                    "description": "Solana wallet address",
+                },
+                "network": {
+                    "type": "string",
+                    "enum": ["mainnet", "devnet"],
+                    "description": "Solana network",
+                    "default": "mainnet",
+                },
+            },
+            "required": ["address"],
+        },
+    },
+    {
+        "name": "wallet_setup_accounts",
+        "description": "Create the default chart of accounts for Solana wallet tracking (sol_wallet, sol_income, sol_expense, network_fees, etc.)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
 ]
 
 
@@ -516,6 +606,90 @@ def _dispatch(ledger: Ledger, name: str, args: dict) -> Any:
 
     elif name == "list_closed_periods":
         return ledger.get_closed_periods()
+
+    # ── v0.3.0 Wallet Tools ──────────────────────────────────────
+
+    elif name == "wallet_connect":
+        from .importer import WalletImporter
+        importer = WalletImporter(ledger=ledger)
+        try:
+            info = importer.connect_wallet(
+                args["address"],
+                network=args.get("network", "mainnet"),
+            )
+            return {
+                "address": info.address,
+                "network": info.network,
+                "sol_balance": info.sol_balance,
+                "lamports": info.lamports,
+                "transactions_imported": info.transaction_count,
+                "last_synced_at": info.last_synced_at.isoformat() if info.last_synced_at else None,
+            }
+        except Exception as e:
+            return {"error": str(e)}
+        finally:
+            importer.close()
+
+    elif name == "wallet_sync":
+        from .importer import WalletImporter
+        importer = WalletImporter(ledger=ledger)
+        try:
+            result = importer.sync_wallet(
+                wallet_address=args["address"],
+                network=args.get("network", "mainnet"),
+                limit=args.get("limit", 50),
+                create_accounts=args.get("create_accounts", True),
+                import_fees=args.get("import_fees", True),
+                dry_run=args.get("dry_run", False),
+            )
+            return {
+                "wallet_address": result.wallet_address,
+                "transactions_fetched": result.transactions_fetched,
+                "transactions_imported": result.transactions_imported,
+                "transactions_skipped": result.transactions_skipped,
+                "transactions_failed": result.transactions_failed,
+                "total_sol_imported": result.total_sol_imported,
+                "entries_created": result.entries_created,
+                "errors": result.errors,
+            }
+        except Exception as e:
+            return {"error": str(e)}
+        finally:
+            importer.close()
+
+    elif name == "wallet_status":
+        from .importer import WalletImporter
+        importer = WalletImporter(ledger=ledger)
+        try:
+            info = importer.get_wallet_info(
+                args["address"],
+                network=args.get("network", "mainnet"),
+            )
+            return {
+                "address": info.address,
+                "network": info.network,
+                "sol_balance": info.sol_balance,
+                "lamports": info.lamports,
+                "last_synced_slot": info.last_synced_slot,
+                "last_synced_at": info.last_synced_at.isoformat() if info.last_synced_at else None,
+                "transaction_count": info.transaction_count,
+            }
+        except Exception as e:
+            return {"error": str(e)}
+        finally:
+            importer.close()
+
+    elif name == "wallet_setup_accounts":
+        from .importer import WalletImporter
+        importer = WalletImporter(ledger=ledger)
+        try:
+            created = importer.setup_wallet_accounts()
+            return {
+                "accounts_created": created,
+                "count": len(created),
+            }
+        finally:
+            importer.close()
 
     else:
         raise LedgerError(f"Unknown tool: {name}")
