@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 from .models import (
     Account, AccountType, AccountBalance,
@@ -20,11 +20,21 @@ from .exceptions import (
     AccountHasChildrenError,
 )
 
+if TYPE_CHECKING:
+    from .sqlite_storage import SQLiteStorage
+
 
 class Ledger:
     """The main ledger engine managing accounts, entries, and business rules."""
 
-    def __init__(self, storage: Storage):
+    @staticmethod
+    def _ensure_aware(dt: datetime) -> datetime:
+        """Ensure a datetime is timezone-aware (assume UTC if naive)."""
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    def __init__(self, storage: Union["Storage", "SQLiteStorage"]):
         self._storage = storage
         self._data: Optional[LedgerData] = None
         self._audit = AuditLog()
@@ -114,6 +124,7 @@ class Ledger:
         name: Optional[str] = None,
         description: Optional[str] = None,
         active: Optional[bool] = None,
+        tags: Optional[list[str]] = None,
         metadata: Optional[dict] = None,
     ) -> Account:
         """Update an existing account."""
@@ -126,6 +137,8 @@ class Ledger:
             account.description = description
         if active is not None:
             account.active = active
+        if tags is not None:
+            account.tags = tags
         if metadata is not None:
             account.metadata.update(metadata)
 
@@ -173,6 +186,7 @@ class Ledger:
         self,
         account_type: Optional[AccountType] = None,
         active_only: bool = False,
+        tag: Optional[str] = None,
     ) -> list[Account]:
         """List all accounts, optionally filtered."""
         accounts = list(self.data.accounts.values())
@@ -180,6 +194,8 @@ class Ledger:
             accounts = [a for a in accounts if a.account_type == account_type]
         if active_only:
             accounts = [a for a in accounts if a.active]
+        if tag is not None:
+            accounts = [a for a in accounts if tag in a.tags]
         return sorted(accounts, key=lambda a: a.code)
 
     # ── Journal Entry Management ────────────────────────────────
@@ -187,18 +203,64 @@ class Ledger:
     def post_entry(
         self,
         description: str,
-        lines: list[JournalLine],
+        lines: list,
         tags: Optional[list[str]] = None,
         timestamp: Optional[datetime] = None,
         metadata: Optional[dict] = None,
     ) -> JournalEntry:
         """Post a new journal entry.
 
+        Accepts ``JournalLine`` objects **or** a convenient tuple shorthand::
+
+            ledger.post_entry("Sale", [
+                ("cash", 1000.0, 0.0),      # (account, debit, credit)
+                ("revenue", 0.0, 1000.0),
+            ])
+
+        2-tuples ``(account, amount)`` are also accepted — the amount is
+        interpreted as a debit. Use negative values for credits, or just
+        use explicit 3-tuples.
+
         Validates:
         - All referenced accounts exist
         - Entry balances (debits = credits)
         - Currency consistency (all accounts in same currency unless rates exist)
         """
+        # Coerce tuple shorthand to JournalLine objects
+        normalised: list[JournalLine] = []
+        for line in lines:
+            if isinstance(line, JournalLine):
+                normalised.append(line)
+            elif isinstance(line, (tuple, list)):
+                if len(line) == 3:
+                    account_code, debit, credit = line
+                    normalised.append(JournalLine(
+                        account_code=account_code,
+                        debit=float(debit),
+                        credit=float(credit),
+                    ))
+                elif len(line) == 2:
+                    account_code, amount = line
+                    if amount >= 0:
+                        normalised.append(JournalLine(
+                            account_code=account_code,
+                            debit=float(amount),
+                        ))
+                    else:
+                        normalised.append(JournalLine(
+                            account_code=account_code,
+                            credit=float(-amount),
+                        ))
+                else:
+                    raise ValueError(
+                        f"Tuple line must have 2 or 3 elements, got {len(line)}: {line}"
+                    )
+            else:
+                raise TypeError(
+                    f"Each line must be a JournalLine or tuple, got {type(line).__name__}"
+                )
+        lines = normalised
+
         # Validate accounts exist
         for line in lines:
             self.get_account(line.account_code)
@@ -275,10 +337,11 @@ class Ledger:
             entries = [e for e in entries if e.reconciled == reconciled]
 
         if start_date is not None:
-            entries = [e for e in entries if e.timestamp >= start_date]
-
+            start_aware = self._ensure_aware(start_date)
+            entries = [e for e in entries if self._ensure_aware(e.timestamp) >= start_aware]
         if end_date is not None:
-            entries = [e for e in entries if e.timestamp <= end_date]
+            end_aware = self._ensure_aware(end_date)
+            entries = [e for e in entries if self._ensure_aware(e.timestamp) <= end_aware]
 
         return sorted(entries, key=lambda e: e.timestamp)
 
@@ -361,6 +424,97 @@ class Ledger:
             self.get_account_balance(code)
             for code in self.data.accounts
         ]
+
+    def reverse_entry(self, entry_id: str, reason: Optional[str] = None) -> JournalEntry:
+        """Reverse a journal entry by creating an opposing entry.
+
+        Creates a new entry that mirrors the original — debits become credits
+        and credits become debits. The original entry is not modified.
+
+        Args:
+            entry_id: ID of the entry to reverse
+            reason: Optional reason for the reversal
+
+        Returns:
+            The new reversal entry
+
+        Raises:
+            JournalEntryNotFoundError: If the entry doesn't exist
+        """
+        original = self.get_entry(entry_id)
+
+        # Create reversing lines
+        reversing_lines = [
+            JournalLine(
+                account_code=line.account_code,
+                debit=line.credit,  # Swap debit/credit
+                credit=line.debit,
+                description=f"Reversal: {line.description}" if line.description else "Reversal",
+            )
+            for line in original.lines
+        ]
+
+        description = reason or f"Reversal of entry: {original.description}"
+
+        reversal = self.post_entry(
+            description=description,
+            lines=reversing_lines,
+            tags=original.tags + ["reversal"],
+            metadata={
+                "reversal_of": original.id,
+                "reversal_reason": reason or "",
+            },
+        )
+
+        self.audit.log(
+            action=AuditAction.ENTRY_REVERSE,
+            details={
+                "original_entry_id": entry_id,
+                "reversal_entry_id": reversal.id,
+                "reason": reason or "",
+            },
+            before={"entry_id": entry_id},
+            after={"reversal_entry_id": reversal.id},
+        )
+
+        return reversal
+
+    def search_entries(
+        self,
+        query: str,
+        account_code: Optional[str] = None,
+        tag: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[JournalEntry]:
+        """Search journal entries by description text.
+
+        Args:
+            query: Search string to match against entry descriptions (case-insensitive)
+            account_code: Optional filter by account code
+            tag: Optional filter by tag
+            limit: Maximum number of entries to return
+
+        Returns:
+            List of matching JournalEntry objects
+        """
+        query_lower = query.lower()
+        entries = list(self.data.entries)
+
+        # Text search on description
+        entries = [e for e in entries if query_lower in e.description.lower()]
+
+        # Apply additional filters
+        if account_code is not None:
+            code = account_code.strip().lower()
+            entries = [
+                e for e in entries
+                if any(line.account_code == code for line in e.lines)
+            ]
+
+        if tag is not None:
+            entries = [e for e in entries if tag in e.tags]
+
+        return sorted(entries, key=lambda e: e.timestamp, reverse=True)[:limit]
 
     # ── Exchange Rate Management ────────────────────────────────
 
