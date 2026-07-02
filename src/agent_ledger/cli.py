@@ -943,5 +943,241 @@ def serve(ctx):
     run_server(ledger_path=ctx.obj["ledger_file"])
 
 
+# ── v1.0.0: Dashboard Command ──────────────────────────────────────
+
+@cli.command("dashboard")
+@click.option("--output", "-o", type=click.Path(), default="dashboard.html",
+              help="Output HTML file path")
+@click.option("--title", "-t", default="Agent Ledger Dashboard",
+              help="Dashboard title")
+@click.option("--no-alerts", is_flag=True, help="Exclude alerts section")
+@click.pass_context
+@handle_error
+def dashboard(ctx, output, title, no_alerts):
+    """Generate an HTML financial dashboard.
+
+    Creates a self-contained HTML file with balance sheet, income statement,
+    trial balance, financial ratios, and active alerts. Open the file in
+    any browser — no server required.
+    """
+    from .dashboard import save_dashboard_html
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    if not ctx.obj["ledger_file"].exists():
+        console.print("[red]Error:[/red] Ledger file not found. Run 'agent-ledger init' first.")
+        sys.exit(1)
+    save_dashboard_html(ledger, output, title=title, include_alerts=not no_alerts)
+    console.print(f"[green]✓[/green] Dashboard saved to: [cyan]{output}[/cyan]")
+    console.print(f"  Open in browser: [cyan]file://{Path(output).resolve()}[/cyan]")
+
+
+# ── v1.0.0: Alert Commands ─────────────────────────────────────────
+
+@cli.group("alert")
+@click.pass_context
+def alert(ctx):
+    """Balance alert rules and triggers."""
+    pass
+
+
+@alert.command("create")
+@click.option("--name", "-n", required=True, help="Rule name")
+@click.option("--account", "-a", required=True, help="Account code to monitor")
+@click.option("--condition", "-c", type=click.Choice(["above", "below", "equals", "changed"]),
+              required=True, help="Trigger condition")
+@click.option("--threshold", "-t", type=float, required=True, help="Threshold value")
+@click.option("--severity", "-s", type=click.Choice(["info", "warning", "critical"]),
+              default="warning", help="Alert severity")
+@click.option("--cooldown", type=int, default=60, help="Cooldown in minutes")
+@click.option("--description", "-d", default="", help="Rule description")
+@click.pass_context
+@handle_error
+def alert_create(ctx, name, account, condition, threshold, severity, cooldown, description):
+    """Create a balance alert rule."""
+    from .alerts import AlertManager, AlertCondition, AlertSeverity
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    am = AlertManager(ledger)
+    rule = am.create_rule(
+        name=name, account_code=account, condition=AlertCondition(condition),
+        threshold=threshold, severity=AlertSeverity(severity),
+        description=description, cooldown_minutes=cooldown,
+    )
+    console.print(f"[green]✓[/green] Alert rule created: [cyan]{rule.id}[/cyan]")
+    console.print(f"  {rule.name} — {rule.account_code} {rule.condition.value} {rule.threshold}")
+
+
+@alert.command("list")
+@click.option("--account", "-a", help="Filter by account code")
+@click.option("--enabled-only", "-e", is_flag=True, help="Only enabled rules")
+@click.pass_context
+@handle_error
+def alert_list(ctx, account, enabled_only):
+    """List alert rules."""
+    from .alerts import AlertManager
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    am = AlertManager(ledger)
+    rules = am.list_rules(account_code=account, enabled_only=enabled_only)
+    if not rules:
+        console.print("[dim]No alert rules found.[/dim]")
+        return
+    table = Table(title="Alert Rules")
+    table.add_column("ID", style="dim", width=12)
+    table.add_column("Name")
+    table.add_column("Account")
+    table.add_column("Condition")
+    table.add_column("Threshold", justify="right")
+    table.add_column("Severity")
+    table.add_column("Enabled")
+    for r in rules:
+        table.add_row(r.id[:8], r.name, r.account_code, r.condition.value,
+                      f"{r.threshold:,.2f}", r.severity.value, "✓" if r.enabled else "✗")
+    console.print(table)
+
+
+@alert.command("check")
+@click.pass_context
+@handle_error
+def alert_check(ctx):
+    """Check all enabled alert rules against current balances."""
+    from .alerts import AlertManager
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    am = AlertManager(ledger)
+    triggers = am.check_rules()
+    if not triggers:
+        console.print("[green]✓[/green] No alerts triggered.")
+        return
+    console.print(f"[yellow]⚠ {len(triggers)} alert(s) triggered:[/yellow]")
+    for t in triggers:
+        color = "red" if t.severity == "critical" else "yellow" if t.severity == "warning" else "blue"
+        console.print(f"  [{color}]{t.severity.upper()}[/{color}] {t.message}")
+
+
+@alert.command("triggers")
+@click.option("--unacknowledged-only", "-u", is_flag=True, help="Only unacknowledged")
+@click.option("--limit", type=int, default=20, help="Max triggers to show")
+@click.pass_context
+@handle_error
+def alert_triggers(ctx, unacknowledged_only, limit):
+    """List triggered alerts."""
+    from .alerts import AlertManager
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    am = AlertManager(ledger)
+    ack = False if unacknowledged_only else None
+    triggers = am.list_triggers(acknowledged=ack, limit=limit)
+    if not triggers:
+        console.print("[dim]No triggers found.[/dim]")
+        return
+    table = Table(title="Alert Triggers")
+    table.add_column("ID", style="dim", width=12)
+    table.add_column("Rule")
+    table.add_column("Severity")
+    table.add_column("Message")
+    table.add_column("Time")
+    table.add_column("Ack")
+    for t in triggers:
+        color = "red" if t.severity == "critical" else "yellow"
+        table.add_row(t.id[:8], t.rule_name, f"[{color}]{t.severity}[/{color}]",
+                      t.message, t.triggered_at.strftime("%Y-%m-%d %H:%M"),
+                      "✓" if t.acknowledged else "✗")
+    console.print(table)
+
+
+@alert.command("ack")
+@click.argument("trigger_id")
+@click.pass_context
+@handle_error
+def alert_ack(ctx, trigger_id):
+    """Acknowledge a triggered alert."""
+    from .alerts import AlertManager
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    am = AlertManager(ledger)
+    am.acknowledge_trigger(trigger_id)
+    console.print(f"[green]✓[/green] Acknowledged: {trigger_id}")
+
+
+@alert.command("delete")
+@click.argument("rule_id")
+@click.pass_context
+@handle_error
+def alert_delete(ctx, rule_id):
+    """Delete an alert rule."""
+    from .alerts import AlertManager
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    am = AlertManager(ledger)
+    am.delete_rule(rule_id)
+    console.print(f"[green]✓[/green] Deleted rule: {rule_id}")
+
+
+# ── v1.0.0: API Key Commands ───────────────────────────────────────
+
+@cli.group("api-key")
+@click.pass_context
+def api_key(ctx):
+    """Manage API keys for REST API access."""
+    pass
+
+
+@api_key.command("create")
+@click.option("--name", "-n", required=True, help="Key name")
+@click.option("--scopes", "-s", multiple=True,
+              type=click.Choice(["read", "write", "reports", "admin", "reconcile", "budget"]),
+              help="Permission scopes (can specify multiple)")
+@click.option("--description", "-d", default="", help="Key description")
+@click.option("--rate-limit", type=int, help="Requests per hour limit")
+@click.pass_context
+@handle_error
+def api_key_create(ctx, name, scopes, description, rate_limit):
+    """Create a new API key."""
+    from .api_keys import APIKeyManager
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    km = APIKeyManager(ledger)
+    key, raw_key = km.create_key(
+        name=name, scopes=list(scopes) or ["read"],
+        description=description, rate_limit_per_hour=rate_limit,
+    )
+    console.print(f"[green]✓[/green] API key created: [cyan]{key.name}[/cyan]")
+    console.print(f"  [yellow]⚠ Store this key securely — it won't be shown again:[/yellow]")
+    console.print(f"  [bold cyan]{raw_key}[/bold cyan]")
+
+
+@api_key.command("list")
+@click.option("--active-only", "-a", is_flag=True, help="Only active keys")
+@click.pass_context
+@handle_error
+def api_key_list(ctx, active_only):
+    """List API keys."""
+    from .api_keys import APIKeyManager
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    km = APIKeyManager(ledger)
+    keys = km.list_keys(active_only=active_only)
+    if not keys:
+        console.print("[dim]No API keys found.[/dim]")
+        return
+    table = Table(title="API Keys")
+    table.add_column("ID", style="dim", width=12)
+    table.add_column("Name")
+    table.add_column("Prefix")
+    table.add_column("Scopes")
+    table.add_column("Active")
+    table.add_column("Requests", justify="right")
+    for k in keys:
+        table.add_row(k.id[:8], k.name, k.key_prefix,
+                      ", ".join(k.scopes), "✓" if k.is_valid else "✗",
+                      str(k.request_count))
+    console.print(table)
+
+
+@api_key.command("revoke")
+@click.argument("key_id")
+@click.pass_context
+@handle_error
+def api_key_revoke(ctx, key_id):
+    """Revoke an API key."""
+    from .api_keys import APIKeyManager
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    km = APIKeyManager(ledger)
+    km.revoke_key(key_id)
+    console.print(f"[green]✓[/green] Revoked: {key_id}")
+
+
 if __name__ == "__main__":
     cli()

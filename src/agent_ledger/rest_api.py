@@ -24,6 +24,8 @@ from .closing import close_period
 from .hierarchy import AccountHierarchy
 from .audit import AuditAction
 from .exceptions import LedgerError
+from .api_keys import APIKeyManager
+from .alerts import AlertManager, AlertCondition, AlertSeverity
 
 
 # ── Request/Response Models ────────────────────────────────────────
@@ -106,7 +108,7 @@ def create_app(ledger_path: str = "ledger.json") -> FastAPI:
     app = FastAPI(
         title="Agent Ledger",
         description="Double-entry accounting ledger REST API for autonomous agents",
-        version="0.6.0",
+        version="1.0.0",
         lifespan=lifespan,
     )
 
@@ -122,7 +124,7 @@ def create_app(ledger_path: str = "ledger.json") -> FastAPI:
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "version": "0.6.0", "timestamp": datetime.now(timezone.utc).isoformat()}
+        return {"status": "ok", "version": "1.0.0", "timestamp": datetime.now(timezone.utc).isoformat()}
 
     # ── Init ─────────────────────────────────────────────────────
 
@@ -1170,10 +1172,251 @@ def create_app(ledger_path: str = "ledger.json") -> FastAPI:
             "warnings": ratios.warnings,
         }
 
+    # ── v1.0.0: Balance Alerts ───────────────────────────────────
+
+    @app.post("/alerts/rules", status_code=201)
+    async def create_alert_rule(req: dict):
+        ledger = get_ledger()
+        am = AlertManager(ledger)
+        try:
+            rule = am.create_rule(
+                name=req["name"],
+                account_code=req["account_code"],
+                condition=AlertCondition(req.get("condition", "above")),
+                threshold=req["threshold"],
+                severity=AlertSeverity(req.get("severity", "warning")),
+                description=req.get("description", ""),
+                cooldown_minutes=req.get("cooldown_minutes", 60),
+            )
+            return {
+                "id": rule.id,
+                "name": rule.name,
+                "account_code": rule.account_code,
+                "condition": rule.condition.value,
+                "threshold": rule.threshold,
+                "severity": rule.severity.value,
+                "enabled": rule.enabled,
+            }
+        except (LedgerError, ValueError) as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.get("/alerts/rules")
+    async def list_alert_rules(
+        account_code: Optional[str] = Query(None),
+        enabled_only: bool = Query(False),
+    ):
+        ledger = get_ledger()
+        am = AlertManager(ledger)
+        rules = am.list_rules(account_code=account_code, enabled_only=enabled_only)
+        return [
+            {
+                "id": r.id,
+                "name": r.name,
+                "account_code": r.account_code,
+                "condition": r.condition.value,
+                "threshold": r.threshold,
+                "severity": r.severity.value,
+                "enabled": r.enabled,
+                "cooldown_minutes": r.cooldown_minutes,
+                "last_triggered": r.last_triggered.isoformat() if r.last_triggered else None,
+            }
+            for r in rules
+        ]
+
+    @app.delete("/alerts/rules/{rule_id}")
+    async def delete_alert_rule(rule_id: str):
+        ledger = get_ledger()
+        am = AlertManager(ledger)
+        try:
+            am.delete_rule(rule_id)
+            return {"deleted": True, "rule_id": rule_id}
+        except LedgerError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    @app.post("/alerts/check")
+    async def check_alerts():
+        ledger = get_ledger()
+        am = AlertManager(ledger)
+        triggers = am.check_rules()
+        return {
+            "checked": True,
+            "triggered": len(triggers),
+            "triggers": [
+                {
+                    "id": t.id,
+                    "rule_id": t.rule_id,
+                    "rule_name": t.rule_name,
+                    "account_code": t.account_code,
+                    "condition": t.condition,
+                    "threshold": t.threshold,
+                    "actual_value": t.actual_value,
+                    "severity": t.severity,
+                    "message": t.message,
+                    "triggered_at": t.triggered_at.isoformat(),
+                }
+                for t in triggers
+            ],
+        }
+
+    @app.get("/alerts/triggers")
+    async def list_alert_triggers(
+        rule_id: Optional[str] = Query(None),
+        acknowledged: Optional[bool] = Query(None),
+        limit: int = Query(50, ge=1, le=200),
+    ):
+        ledger = get_ledger()
+        am = AlertManager(ledger)
+        triggers = am.list_triggers(rule_id=rule_id, acknowledged=acknowledged, limit=limit)
+        return [
+            {
+                "id": t.id,
+                "rule_id": t.rule_id,
+                "rule_name": t.rule_name,
+                "account_code": t.account_code,
+                "condition": t.condition,
+                "threshold": t.threshold,
+                "actual_value": t.actual_value,
+                "severity": t.severity,
+                "message": t.message,
+                "triggered_at": t.triggered_at.isoformat(),
+                "acknowledged": t.acknowledged,
+            }
+            for t in triggers
+        ]
+
+    @app.post("/alerts/triggers/{trigger_id}/acknowledge")
+    async def acknowledge_alert(trigger_id: str):
+        ledger = get_ledger()
+        am = AlertManager(ledger)
+        try:
+            t = am.acknowledge_trigger(trigger_id)
+            return {"acknowledged": True, "trigger_id": t.id}
+        except LedgerError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    @app.post("/alerts/acknowledge-all")
+    async def acknowledge_all_alerts(rule_id: Optional[str] = Query(None)):
+        ledger = get_ledger()
+        am = AlertManager(ledger)
+        count = am.acknowledge_all(rule_id=rule_id)
+        return {"acknowledged_count": count}
+
+    # ── v1.0.0: API Key Management ───────────────────────────────
+
+    @app.post("/api-keys", status_code=201)
+    async def create_api_key(req: dict):
+        ledger = get_ledger()
+        km = APIKeyManager(ledger)
+        try:
+            key, raw_key = km.create_key(
+                name=req["name"],
+                scopes=req.get("scopes", ["read"]),
+                description=req.get("description", ""),
+                rate_limit_per_hour=req.get("rate_limit_per_hour"),
+            )
+            return {
+                "id": key.id,
+                "name": key.name,
+                "key_prefix": key.key_prefix,
+                "key": raw_key,  # Only returned at creation
+                "scopes": key.scopes,
+                "message": "Store this key securely — it won't be shown again.",
+            }
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.get("/api-keys")
+    async def list_api_keys(active_only: bool = Query(False)):
+        ledger = get_ledger()
+        km = APIKeyManager(ledger)
+        keys = km.list_keys(active_only=active_only)
+        return [
+            {
+                "id": k.id,
+                "name": k.name,
+                "key_prefix": k.key_prefix,
+                "scopes": k.scopes,
+                "active": k.active,
+                "created_at": k.created_at.isoformat(),
+                "last_used": k.last_used.isoformat() if k.last_used else None,
+                "expires_at": k.expires_at.isoformat() if k.expires_at else None,
+                "request_count": k.request_count,
+                "rate_limit_per_hour": k.rate_limit_per_hour,
+            }
+            for k in keys
+        ]
+
+    @app.delete("/api-keys/{key_id}")
+    async def revoke_api_key(key_id: str):
+        ledger = get_ledger()
+        km = APIKeyManager(ledger)
+        try:
+            km.revoke_key(key_id)
+            return {"revoked": True, "key_id": key_id}
+        except KeyError:
+            raise HTTPException(status_code=404, detail="API key not found")
+
+    @app.post("/api-keys/{key_id}/scopes")
+    async def update_key_scopes(key_id: str, req: dict):
+        ledger = get_ledger()
+        km = APIKeyManager(ledger)
+        try:
+            key = km.update_key(key_id, scopes=req.get("scopes"))
+            return {"id": key.id, "scopes": key.scopes}
+        except (KeyError, ValueError) as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    # ── v1.0.0: Dashboard ────────────────────────────────────────
+
+    @app.get("/dashboard")
+    async def get_dashboard(format: str = Query("json", description="json or html")):
+        ledger = get_ledger()
+        if format == "html":
+            from .dashboard import generate_dashboard_html
+            from fastapi import Response
+            html_content = generate_dashboard_html(ledger)
+            return Response(content=html_content, media_type="text/html")
+        else:
+            from .reports import generate_trial_balance, generate_income_statement, generate_balance_sheet
+            from .ratios import compute_ratios, get_financial_health
+            tb = generate_trial_balance(ledger)
+            ist = generate_income_statement(ledger)
+            bs = generate_balance_sheet(ledger)
+            ratios = compute_ratios(ledger)
+            health = get_financial_health(ratios)
+            return {
+                "balance_sheet": {
+                    "total_assets": bs.total_assets,
+                    "total_liabilities": bs.total_liabilities,
+                    "total_equity": bs.total_equity,
+                    "retained_earnings": bs.retained_earnings,
+                },
+                "income_statement": {
+                    "total_revenue": ist.total_revenue,
+                    "total_expenses": ist.total_expenses,
+                    "net_income": ist.net_income,
+                },
+                "trial_balance": {
+                    "total_debits": tb.total_debits,
+                    "total_credits": tb.total_credits,
+                    "is_balanced": tb.is_balanced,
+                },
+                "ratios": {
+                    "current_ratio": ratios.current_ratio,
+                    "quick_ratio": ratios.quick_ratio,
+                    "debt_to_equity": ratios.debt_to_equity,
+                    "profit_margin": ratios.profit_margin,
+                    "return_on_assets": ratios.return_on_assets,
+                },
+                "health": health,
+                "summary": {
+                    "total_accounts": len(ledger.list_accounts()),
+                    "total_entries": len(ledger.data.entries),
+                    "reconciled_entries": len([e for e in ledger.data.entries if e.reconciled]),
+                },
+            }
+
     return app
-
-
-# ── Helpers ──────────────────────────────────────────────────────
 
 def _parse_date(date_str: Optional[str]) -> Optional[datetime]:
     """Parse an ISO 8601 date string to timezone-aware datetime."""
