@@ -1,4 +1,18 @@
+<div align="center">
+
 # Agent Ledger
+
+**Double-entry accounting ledger for autonomous AI agents**
+
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Tests: 708](https://img.shields.io/badge/tests-708%20passing-brightgreen.svg)](#testing)
+[![MCP](https://img.shields.io/badge/MCP-server-7c3aed)](https://modelcontextprotocol.io)
+[![Version: 1.0.0](https://img.shields.io/badge/version-1.0.0-blue.svg)](#changelog)
+
+</div>
+
+---
 
 Double-entry accounting ledger CLI + MCP server for autonomous agents.
 
