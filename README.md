@@ -6,9 +6,9 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests: 708](https://img.shields.io/badge/tests-708%20passing-brightgreen.svg)](#testing)
-[![MCP](https://img.shields.io/badge/MCP-server-7c3aed)](https://modelcontextprotocol.io)
-[![Version: 1.0.0](https://img.shields.io/badge/version-1.0.0-blue.svg)](#changelog)
+[![Tests: 788](https://img.shields.io/badge/tests-788%20passing-brightgreen.svg)](#testing)
+|[![MCP](https://img.shields.io/badge/MCP-server-7c3aed)](https://modelcontextprotocol.io)
+|[![Version: 1.1.0](https://img.shields.io/badge/version-1.1.0-blue.svg)](#changelog)
 
 </div>
 
@@ -36,6 +36,7 @@ Create and manage a chart of accounts, post journal entries with full double-ent
 - **CSV Export** — Export accounts, entries, and reports to CSV files
 - **Cost Centers / Projects** — Dimensional accounting for tracking profitability by project, department, or cost center
 - **Multi-Period Comparison** — Side-by-side period analysis with variance and percentage change
+- **Settlement & Netting** — Multi-party inter-agent obligation netting with dispute resolution and cryptographic settlement proofs
 - **Data Persistence** — JSON-based storage, portable and human-readable
 - **CLI** — Full-featured Click CLI with rich output
 - **MCP Server** — Model Context Protocol server for autonomous agent integration
@@ -190,7 +191,16 @@ src/agent_ledger/
 
 ## Changelog
 
-### v0.9.0
+### v1.1.0
+- **Settlement & Netting Engine**: Multi-party inter-agent obligation netting. Agents add obligations (who owes whom), then the engine calculates minimum settlement payments via greedy netting. Includes dispute resolution (mark items disputed, resolve them, recalculate), cryptographic settlement proofs (SHA-256), and participant position tracking.
+- 9 new MCP tools (98 total): `create_settlement_batch`, `add_settlement_item`, `calculate_settlement_netting`, `settle_batch`, `list_settlement_batches`, `get_settlement_batch`, `get_party_position`, `dispute_settlement_item`, `get_settlement_proof`
+- 80 new tests (788 total)
+
+### v1.0.0
+- **Alerts**: Real-time alert rules with conditions (above, below, equals, changed), severity levels, and trigger tracking
+- **API Keys**: Scoped API key management for REST API access control
+- **Dashboard**: Self-contained HTML financial dashboard with balance sheet, income statement, trial balance, ratios, and alerts
+- 81 new tests (708 total)
 - **Cost Centers / Projects**: Dimensional accounting for tracking revenue and expenses by project, department, or cost center. Full CRUD, entry assignment, per-center financial reports, cross-center summary, and hierarchy tree
 - **Multi-Period Comparison**: Side-by-side period comparison of account balances and income statements with variance and percentage change indicators (up/down/stable/new/gone)
 - 11 new MCP tools (89 total), new CLI command groups (`cost-center`, `compare`)

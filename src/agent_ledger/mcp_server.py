@@ -22,6 +22,11 @@ from .export import (
     export_hierarchy_csv,
 )
 from .exceptions import LedgerError
+from .settlement import (
+    SettlementEngine,
+    SettlementItemType,
+    SettlementStatus,
+)
 
 
 def _ledger_to_dict(ledger: Ledger) -> dict:
@@ -1571,6 +1576,134 @@ TOOLS = [
             },
         },
     },
+    # ── Settlement & Netting Tools ──────────────────────────────────
+    {
+        "name": "create_settlement_batch",
+        "description": (
+            "Create a new multi-party settlement batch for netting inter-agent "
+            "obligations. Agents add items (who owes whom), then calculate "
+            "netting to minimize settlement payments."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Batch name", "default": ""},
+                "description": {"type": "string", "description": "Batch description", "default": ""},
+                "currency": {"type": "string", "description": "Settlement currency", "default": "USD"},
+            },
+        },
+    },
+    {
+        "name": "add_settlement_item",
+        "description": (
+            "Add an obligation to a settlement batch: payer owes payee an amount."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "batch_id": {"type": "string", "description": "Settlement batch ID"},
+                "payer": {"type": "string", "description": "Agent that owes (payer)"},
+                "payee": {"type": "string", "description": "Agent that is owed (payee)"},
+                "amount": {"type": "number", "description": "Amount owed", "exclusiveMinimum": 0},
+                "item_type": {
+                    "type": "string",
+                    "enum": ["invoice", "loan", "service_fee", "refund", "commission", "custom"],
+                    "description": "Type of obligation",
+                    "default": "custom",
+                },
+                "description": {"type": "string", "description": "Item description", "default": ""},
+                "reference": {"type": "string", "description": "External reference (invoice/txn ID)", "default": ""},
+            },
+            "required": ["batch_id", "payer", "payee", "amount"],
+        },
+    },
+    {
+        "name": "calculate_settlement_netting",
+        "description": (
+            "Calculate multi-lateral netting for a settlement batch. Reduces gross "
+            "obligations to minimum settlement payments. Produces net positions "
+            "for each party and a cryptographic proof."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "batch_id": {"type": "string", "description": "Settlement batch ID"},
+            },
+            "required": ["batch_id"],
+        },
+    },
+    {
+        "name": "settle_batch",
+        "description": "Mark a settlement batch as settled, finalizing the proof.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "batch_id": {"type": "string", "description": "Settlement batch ID"},
+            },
+            "required": ["batch_id"],
+        },
+    },
+    {
+        "name": "list_settlement_batches",
+        "description": "List settlement batches, optionally filtered by status.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["draft", "calculated", "settled", "disputed", "cancelled"],
+                    "description": "Filter by status",
+                },
+            },
+        },
+    },
+    {
+        "name": "get_settlement_batch",
+        "description": "Get full details of a settlement batch including net positions and proof.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "batch_id": {"type": "string", "description": "Settlement batch ID"},
+            },
+            "required": ["batch_id"],
+        },
+    },
+    {
+        "name": "get_party_position",
+        "description": "Get the net position for a specific party in a settlement batch.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "batch_id": {"type": "string", "description": "Settlement batch ID"},
+                "party": {"type": "string", "description": "Agent name/ID"},
+            },
+            "required": ["batch_id", "party"],
+        },
+    },
+    {
+        "name": "dispute_settlement_item",
+        "description": "Mark a settlement item as disputed with a reason.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "batch_id": {"type": "string", "description": "Settlement batch ID"},
+                "item_id": {"type": "string", "description": "Item ID to dispute"},
+                "reason": {"type": "string", "description": "Reason for dispute"},
+            },
+            "required": ["batch_id", "item_id", "reason"],
+        },
+    },
+    {
+        "name": "get_settlement_proof",
+        "description": "Get the cryptographic proof for a settled batch.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "batch_id": {"type": "string", "description": "Settlement batch ID"},
+            },
+            "required": ["batch_id"],
+        },
+    },
 ]
 
 
@@ -2046,6 +2179,109 @@ def _dispatch(ledger: Ledger, name: str, args: dict) -> Any:
             "errors": result.errors,
         }
 
+    # ── Settlement & Netting ────────────────────────────────────────
+    elif name == "create_settlement_batch":
+        engine = _get_or_create_settlement_engine(ledger)
+        batch = engine.create_batch(
+            name=args.get("name", ""),
+            description=args.get("description", ""),
+            currency=args.get("currency", "USD"),
+        )
+        _persist_settlement_engine(ledger, engine)
+        return _settlement_batch_to_dict(batch)
+
+    elif name == "add_settlement_item":
+        engine = _get_or_create_settlement_engine(ledger)
+        item = engine.add_item(
+            batch_id=args["batch_id"],
+            payer=args["payer"],
+            payee=args["payee"],
+            amount=args["amount"],
+            item_type=SettlementItemType(args.get("item_type", "custom")),
+            description=args.get("description", ""),
+            reference=args.get("reference", ""),
+        )
+        _persist_settlement_engine(ledger, engine)
+        return {
+            "id": item.id,
+            "payer": item.payer,
+            "payee": item.payee,
+            "amount": item.amount,
+            "currency": item.currency,
+            "item_type": item.item_type.value,
+            "description": item.description,
+            "reference": item.reference,
+        }
+
+    elif name == "calculate_settlement_netting":
+        engine = _get_or_create_settlement_engine(ledger)
+        batch = engine.calculate_netting(args["batch_id"])
+        _persist_settlement_engine(ledger, engine)
+        return _settlement_batch_to_dict(batch)
+
+    elif name == "settle_batch":
+        engine = _get_or_create_settlement_engine(ledger)
+        batch = engine.settle(args["batch_id"])
+        _persist_settlement_engine(ledger, engine)
+        return _settlement_batch_to_dict(batch)
+
+    elif name == "list_settlement_batches":
+        engine = _get_or_create_settlement_engine(ledger)
+        status_filter = SettlementStatus(args["status"]) if "status" in args else None
+        batches = engine.list_batches(status=status_filter)
+        return [_settlement_batch_summary(b) for b in batches]
+
+    elif name == "get_settlement_batch":
+        engine = _get_or_create_settlement_engine(ledger)
+        batch = engine.get_batch(args["batch_id"])
+        return _settlement_batch_to_dict(batch)
+
+    elif name == "get_party_position":
+        engine = _get_or_create_settlement_engine(ledger)
+        pos = engine.get_party_summary(args["batch_id"], args["party"])
+        return {
+            "party": pos.party,
+            "gross_out": pos.gross_out,
+            "gross_in": pos.gross_in,
+            "net": pos.net,
+            "direction": pos.direction.value,
+            "currency": pos.currency,
+        }
+
+    elif name == "dispute_settlement_item":
+        engine = _get_or_create_settlement_engine(ledger)
+        item = engine.dispute_item(
+            batch_id=args["batch_id"],
+            item_id=args["item_id"],
+            reason=args["reason"],
+        )
+        _persist_settlement_engine(ledger, engine)
+        return {
+            "id": item.id,
+            "disputed": item.disputed,
+            "dispute_reason": item.dispute_reason,
+            "payer": item.payer,
+            "payee": item.payee,
+            "amount": item.amount,
+        }
+
+    elif name == "get_settlement_proof":
+        engine = _get_or_create_settlement_engine(ledger)
+        batch = engine.get_batch(args["batch_id"])
+        if not batch.proof:
+            return {"error": "No proof — calculate netting first"}
+        return {
+            "settlement_id": batch.proof.settlement_id,
+            "proof_hash": batch.proof.proof_hash,
+            "item_count": batch.proof.item_count,
+            "total_gross_volume": batch.proof.total_gross_volume,
+            "total_net_volume": batch.proof.total_net_volume,
+            "netted_savings": batch.proof.netted_savings,
+            "participant_count": batch.proof.participant_count,
+            "created_at": batch.proof.created_at.isoformat(),
+            "settled_at": batch.proof.settled_at.isoformat() if batch.proof.settled_at else None,
+        }
+
     else:
         raise LedgerError(f"Unknown tool: {name}")
 
@@ -2069,6 +2305,46 @@ def _serialize_tree_node(node: dict) -> dict:
         "rollup_balance": json.loads(rollup.model_dump_json()),
         "depth": node["depth"],
         "children": [_serialize_tree_node(c) for c in node["children"]],
+    }
+
+
+# ── Settlement Engine Helpers ──────────────────────────────────
+
+
+def _get_or_create_settlement_engine(ledger: Ledger) -> SettlementEngine:
+    """Get the settlement engine from ledger metadata, or create one."""
+    engine_data = ledger.data.metadata.get("settlements")
+    engine = SettlementEngine()
+    if engine_data:
+        engine.from_dict(engine_data)
+    return engine
+
+
+def _persist_settlement_engine(ledger: Ledger, engine: SettlementEngine) -> None:
+    """Persist the settlement engine state to ledger metadata."""
+    ledger.data.metadata["settlements"] = engine.to_dict()
+    ledger.save()
+
+
+def _settlement_batch_to_dict(batch) -> dict:
+    """Convert a settlement batch to a JSON-serializable dict."""
+    from .settlement import SettlementEngine
+    return SettlementEngine._batch_to_dict(batch)
+
+
+def _settlement_batch_summary(batch) -> dict:
+    """A compact summary of a settlement batch for list views."""
+    return {
+        "id": batch.id,
+        "name": batch.name,
+        "status": batch.status.value,
+        "currency": batch.currency,
+        "item_count": len(batch.items),
+        "disputed_count": sum(1 for i in batch.items if i.disputed),
+        "total_gross_volume": batch.proof.total_gross_volume if batch.proof else 0.0,
+        "total_net_volume": batch.proof.total_net_volume if batch.proof else 0.0,
+        "created_at": batch.created_at.isoformat(),
+        "settled_at": batch.settled_at.isoformat() if batch.settled_at else None,
     }
 
 

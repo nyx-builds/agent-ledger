@@ -84,3 +84,26 @@ class ReconciliationItemNotFoundError(LedgerError):
 class InvalidReconciliationStateError(LedgerError):
     """Invalid state transition for reconciliation."""
     pass
+
+
+# ── Settlement exceptions ──────────────────────────────────────────
+
+
+class SettlementNotFoundError(LedgerError):
+    """Settlement batch not found."""
+    pass
+
+
+class SettlementItemNotFoundError(LedgerError):
+    """Settlement item not found within a batch."""
+    pass
+
+
+class InvalidSettlementStateError(LedgerError):
+    """Invalid state transition for a settlement batch."""
+    pass
+
+
+class DuplicateSettlementItemError(LedgerError):
+    """A settlement item with the same reference already exists in the batch."""
+    pass
