@@ -6,6 +6,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![CI](https://github.com/nyx-builds/agent-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/nyx-builds/agent-ledger/actions/workflows/ci.yml)
 [![Tests: 788](https://img.shields.io/badge/tests-788%20passing-brightgreen.svg)](#testing)
 |[![MCP](https://img.shields.io/badge/MCP-server-7c3aed)](https://modelcontextprotocol.io)
 |[![Version: 1.1.0](https://img.shields.io/badge/version-1.1.0-blue.svg)](#changelog)
