@@ -107,3 +107,23 @@ class InvalidSettlementStateError(LedgerError):
 class DuplicateSettlementItemError(LedgerError):
     """A settlement item with the same reference already exists in the batch."""
     pass
+
+
+class SettlementFeeNotFoundError(LedgerError):
+    """A settlement fee was not found."""
+    pass
+
+
+class DuplicateSettlementFeeError(LedgerError):
+    """A settlement fee with the same reference already exists."""
+    pass
+
+
+class InvalidFeeError(LedgerError):
+    """Fee amount or configuration is invalid."""
+    pass
+
+
+class PartialSettlementError(LedgerError):
+    """Error during partial settlement (over-payment, wrong state, etc.)."""
+    pass

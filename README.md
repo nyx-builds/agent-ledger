@@ -7,9 +7,9 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![CI](https://github.com/nyx-builds/agent-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/nyx-builds/agent-ledger/actions/workflows/ci.yml)
-[![Tests: 788](https://img.shields.io/badge/tests-788%20passing-brightgreen.svg)](#testing)
+[![Tests: 873](https://img.shields.io/badge/tests-873%20passing-brightgreen.svg)](#testing)
 |[![MCP](https://img.shields.io/badge/MCP-server-7c3aed)](https://modelcontextprotocol.io)
-|[![Version: 1.1.0](https://img.shields.io/badge/version-1.1.0-blue.svg)](#changelog)
+|[![Version: 1.2.0](https://img.shields.io/badge/version-1.2.0-blue.svg)](#changelog)
 
 </div>
 
@@ -38,6 +38,10 @@ Create and manage a chart of accounts, post journal entries with full double-ent
 - **Cost Centers / Projects** — Dimensional accounting for tracking profitability by project, department, or cost center
 - **Multi-Period Comparison** — Side-by-side period analysis with variance and percentage change
 - **Settlement & Netting** — Multi-party inter-agent obligation netting with dispute resolution and cryptographic settlement proofs
+- **Multi-Currency Settlement** — Net obligations across currencies with automatic FX conversion to the batch settlement currency
+- **Settlement Fees** — Processing, network, gas, FX spread, and commission fees with payer/payee/split allocation
+- **Partial Settlement** — Settle net positions incrementally over time with outstanding balance tracking
+- **Optimization Reports** — Gross vs net volume analysis, savings percentage, payment reduction metrics
 - **Data Persistence** — JSON-based storage, portable and human-readable
 - **CLI** — Full-featured Click CLI with rich output
 - **MCP Server** — Model Context Protocol server for autonomous agent integration
@@ -191,6 +195,14 @@ src/agent_ledger/
 ```
 
 ## Changelog
+
+### v1.2.0
+- **Multi-Currency Settlement**: Items in different currencies are automatically FX-converted to the batch settlement currency before netting. The MCP server auto-wires the ledger's exchange rates as an FX converter.
+- **Settlement Fee Engine**: 7 fee types (processing, network, gas, fx_spread, late, commission, custom) with 3 allocation strategies (payer bears, payee absorbs, 50/50 split). Fees are converted to batch currency and affect net positions.
+- **Partial Settlement**: Settle net obligations incrementally over time. Track outstanding balances per net payment, record partial payments with references (txn hashes), and auto-finalize when fully covered.
+- **Optimization Reports**: Detailed netting analytics — gross vs net volume, savings percentage, payment reduction ratio, per-party breakdown, fee totals, partial settlement status.
+- 7 new MCP tools (105 total): `add_settlement_fee`, `list_settlement_fees`, `remove_settlement_fee`, `record_partial_settlement`, `get_outstanding_balances`, `settle_from_partials`, `get_settlement_optimization_report`
+- 85 new tests (873 total)
 
 ### v1.1.0
 - **Settlement & Netting Engine**: Multi-party inter-agent obligation netting. Agents add obligations (who owes whom), then the engine calculates minimum settlement payments via greedy netting. Includes dispute resolution (mark items disputed, resolve them, recalculate), cryptographic settlement proofs (SHA-256), and participant position tracking.

@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import Optional, Callable
 
 from .exceptions import (
     LedgerError,
@@ -20,6 +20,10 @@ from .exceptions import (
     SettlementItemNotFoundError,
     InvalidSettlementStateError,
     DuplicateSettlementItemError,
+    SettlementFeeNotFoundError,
+    DuplicateSettlementFeeError,
+    InvalidFeeError,
+    PartialSettlementError,
 )
 
 
@@ -47,6 +51,24 @@ class NetPositionDirection(str, Enum):
     OWES = "owes"        # net debtor — must pay
     OWED = "owed"         # net creditor — will receive
     EVEN = "even"          # net zero
+
+
+class SettlementFeeType(str, Enum):
+    """Types of fees that can be attached to settlement items."""
+    PROCESSING = "processing"     # platform/handling fee
+    NETWORK = "network"           # blockchain/network fee
+    GAS = "gas"                   # gas fee (crypto settlements)
+    FX_SPREAD = "fx_spread"       # currency conversion spread
+    LATE = "late"                 # late settlement penalty
+    COMMISSION = "commission"     # commission/intermediary fee
+    CUSTOM = "custom"
+
+
+class FeeAllocation(str, Enum):
+    """Who bears the fee cost."""
+    PAYER = "payer"       # payer pays extra on top of obligation
+    PAYEE = "payee"       # payee absorbs from obligation
+    SPLIT = "split"       # 50/50 split between payer and payee
 
 
 @dataclass
@@ -87,6 +109,43 @@ class NetPayment:
 
 
 @dataclass
+class SettlementFee:
+    """A fee attached to a settlement item or batch.
+
+    Fees are converted to the batch settlement currency and added to
+    the gross obligation volume during netting.
+    """
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    fee_type: SettlementFeeType = SettlementFeeType.PROCESSING
+    amount: float = 0.0
+    currency: str = "USD"
+    description: str = ""
+    allocation: FeeAllocation = FeeAllocation.PAYER
+    reference: str = ""                     # external reference for dedup
+    metadata: dict = field(default_factory=dict)
+    item_id: Optional[str] = None           # link to a specific SettlementItem
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass
+class PartialSettlement:
+    """Records a partial payment of a net obligation.
+
+    Allows agents to settle portions of their net position over time.
+    The outstanding balance is tracked until fully settled.
+    """
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    net_payment_index: int = 0      # index into batch.net_payments
+    payer: str = ""
+    payee: str = ""
+    amount: float = 0.0             # amount paid in this partial settlement
+    currency: str = "USD"
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    reference: str = ""
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass
 class SettlementProof:
     """Cryptographic proof of a settlement for verification."""
     settlement_id: str = ""
@@ -108,8 +167,10 @@ class SettlementBatch:
     description: str = ""
     currency: str = "USD"
     items: list[SettlementItem] = field(default_factory=list)
+    fees: list[SettlementFee] = field(default_factory=list)
     net_positions: list[NetPosition] = field(default_factory=list)
     net_payments: list[NetPayment] = field(default_factory=list)
+    partial_settlements: list[PartialSettlement] = field(default_factory=list)
     proof: Optional[SettlementProof] = None
     status: SettlementStatus = SettlementStatus.DRAFT
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -130,8 +191,18 @@ class SettlementEngine:
         engine.settle(batch)
     """
 
-    def __init__(self):
+    def __init__(self, fx_converter: Optional[Callable] = None):
+        """Initialize the settlement engine.
+
+        Args:
+            fx_converter: Optional callable ``(amount, from_currency, to_currency) -> float``
+                          used to convert multi-currency items and fees to the batch
+                          settlement currency before netting. If None, multi-currency
+                          items must already be in the batch currency or a
+                          CurrencyMismatchError-like LedgerError is raised.
+        """
         self._batches: dict[str, SettlementBatch] = {}
+        self._fx_converter = fx_converter
 
     # ── Batch lifecycle ──────────────────────────────────────────
 
@@ -187,6 +258,25 @@ class SettlementEngine:
                 f"Cannot delete batch in {batch.status.value} state — cancel first"
             )
         del self._batches[batch_id]
+
+    # ── FX conversion ────────────────────────────────────────────
+
+    def _convert_to_batch_currency(self, amount: float, from_currency: str,
+                                   to_currency: str) -> float:
+        """Convert an amount to the batch settlement currency.
+
+        Uses the FX converter if one was provided; otherwise the amount
+        must already be in the target currency.
+        """
+        if from_currency.upper() == to_currency.upper():
+            return round(amount, 2)
+        if self._fx_converter is None:
+            raise LedgerError(
+                f"Multi-currency settlement requires an FX converter. "
+                f"Item currency {from_currency} != batch currency {to_currency}. "
+                f"Pass fx_converter to SettlementEngine()."
+            )
+        return round(self._fx_converter(amount, from_currency, to_currency), 2)
 
     # ── Item management ──────────────────────────────────────────
 
@@ -325,7 +415,7 @@ class SettlementEngine:
             raise InvalidSettlementStateError("All items are disputed — cannot calculate netting")
 
         # Step 1: Compute bilateral net positions
-        # bilateral[payer][payee] = net amount payer owes payee
+        # bilateral[payer][payee] = net amount payer owes payee (in batch currency)
         bilateral: dict[str, dict[str, float]] = {}
 
         for item in active_items:
@@ -336,17 +426,22 @@ class SettlementEngine:
             if payee not in bilateral:
                 bilateral[payee] = {}
 
+            # Multi-currency: convert item amount to batch currency
+            converted = self._convert_to_batch_currency(
+                item.amount, item.currency, batch.currency
+            )
+
             # If payee also owes payer, net them
             reverse = bilateral.get(payee, {}).get(payer, 0.0)
             if reverse > 0:
                 # Net: reduce both
-                netted = min(reverse, item.amount)
+                netted = min(reverse, converted)
                 bilateral[payee][payer] = round(reverse - netted, 2)
-                remaining = round(item.amount - netted, 2)
+                remaining = round(converted - netted, 2)
                 if remaining > 0:
                     bilateral[payer][payee] = bilateral.get(payer, {}).get(payee, 0.0) + remaining
             else:
-                bilateral[payer][payee] = bilateral.get(payer, {}).get(payee, 0.0) + item.amount
+                bilateral[payer][payee] = bilateral.get(payer, {}).get(payee, 0.0) + converted
 
         # Clean up zero balances
         for payer in list(bilateral.keys()):
@@ -365,8 +460,42 @@ class SettlementEngine:
         for item in active_items:
             all_parties.add(item.payer)
             all_parties.add(item.payee)
-            gross_out[item.payer] = gross_out.get(item.payer, 0.0) + item.amount
-            gross_in[item.payee] = gross_in.get(item.payee, 0.0) + item.amount
+            converted = self._convert_to_batch_currency(
+                item.amount, item.currency, batch.currency
+            )
+            gross_out[item.payer] = gross_out.get(item.payer, 0.0) + converted
+            gross_in[item.payee] = gross_in.get(item.payee, 0.0) + converted
+
+        # Apply fees to gross positions based on allocation
+        for fee in batch.fees:
+            fee_converted = self._convert_to_batch_currency(
+                fee.amount, fee.currency, batch.currency
+            )
+            if fee.item_id:
+                # Find the item this fee belongs to
+                linked_item = None
+                for item in active_items:
+                    if item.id == fee.item_id:
+                        linked_item = item
+                        break
+                if linked_item is None:
+                    continue
+                payer = linked_item.payer
+                payee = linked_item.payee
+            else:
+                # Batch-level fee — skip party assignment, just add to totals
+                continue
+
+            if fee.allocation == FeeAllocation.PAYER:
+                # Payer bears the fee — increases their gross obligation
+                gross_out[payer] = gross_out.get(payer, 0.0) + fee_converted
+            elif fee.allocation == FeeAllocation.PAYEE:
+                # Payee bears the fee — reduces what they receive
+                gross_in[payee] = gross_in.get(payee, 0.0) - fee_converted
+            elif fee.allocation == FeeAllocation.SPLIT:
+                half = round(fee_converted / 2, 2)
+                gross_out[payer] = gross_out.get(payer, 0.0) + half
+                gross_in[payee] = gross_in.get(payee, 0.0) - half
 
         net_positions: list[NetPosition] = []
         for party in sorted(all_parties):
@@ -526,6 +655,284 @@ class SettlementEngine:
             return False
         return batch.proof.proof_hash == expected_hash
 
+    # ── Fee management ───────────────────────────────────────────
+
+    def add_fee(
+        self,
+        batch_id: str,
+        fee_type: SettlementFeeType = SettlementFeeType.PROCESSING,
+        amount: float = 0.0,
+        currency: Optional[str] = None,
+        description: str = "",
+        allocation: FeeAllocation = FeeAllocation.PAYER,
+        item_id: Optional[str] = None,
+        reference: str = "",
+        metadata: Optional[dict] = None,
+    ) -> SettlementFee:
+        """Add a fee to a settlement batch.
+
+        Fees are converted to the batch currency during netting and affect
+        gross positions based on the allocation strategy:
+
+        - PAYER: payer's gross obligation increases by the fee amount
+        - PAYEE: payee's gross receivable decreases by the fee amount
+        - SPLIT: half to payer, half to payee
+        """
+        batch = self.get_batch(batch_id)
+        if batch.status not in (SettlementStatus.DRAFT, SettlementStatus.DISPUTED):
+            raise InvalidSettlementStateError(
+                f"Cannot add fees to batch in {batch.status.value} state"
+            )
+        if amount <= 0:
+            raise InvalidFeeError("Fee amount must be positive")
+        if not isinstance(fee_type, SettlementFeeType):
+            fee_type = SettlementFeeType(fee_type)
+        if not isinstance(allocation, FeeAllocation):
+            allocation = FeeAllocation(allocation)
+
+        # Validate item_id if provided
+        if item_id:
+            found = any(i.id == item_id for i in batch.items)
+            if not found:
+                raise SettlementItemNotFoundError(
+                    f"Cannot attach fee: item {item_id} not found in batch"
+                )
+
+        # Check for duplicate references
+        if reference:
+            for fee in batch.fees:
+                if fee.reference and fee.reference == reference:
+                    raise DuplicateSettlementFeeError(
+                        f"Fee with reference '{reference}' already exists in batch"
+                    )
+
+        fee = SettlementFee(
+            fee_type=fee_type,
+            amount=round(amount, 2),
+            currency=currency or batch.currency,
+            description=description,
+            allocation=allocation,
+            item_id=item_id,
+            reference=reference,
+            metadata=metadata or {},
+        )
+        batch.fees.append(fee)
+        return fee
+
+    def remove_fee(self, batch_id: str, fee_id: str) -> SettlementBatch:
+        """Remove a fee from a batch."""
+        batch = self.get_batch(batch_id)
+        if batch.status not in (SettlementStatus.DRAFT, SettlementStatus.DISPUTED):
+            raise InvalidSettlementStateError(
+                f"Cannot remove fees from batch in {batch.status.value} state"
+            )
+        for i, fee in enumerate(batch.fees):
+            if fee.id == fee_id:
+                batch.fees.pop(i)
+                return batch
+        raise SettlementFeeNotFoundError(f"Fee {fee_id} not found in batch")
+
+    def list_fees(self, batch_id: str, item_id: Optional[str] = None) -> list[SettlementFee]:
+        """List fees in a batch, optionally filtered by linked item."""
+        batch = self.get_batch(batch_id)
+        if item_id:
+            return [f for f in batch.fees if f.item_id == item_id]
+        return list(batch.fees)
+
+    def get_total_fees(self, batch_id: str) -> float:
+        """Get the total fee amount in the batch settlement currency."""
+        batch = self.get_batch(batch_id)
+        total = 0.0
+        for fee in batch.fees:
+            total += self._convert_to_batch_currency(
+                fee.amount, fee.currency, batch.currency
+            )
+        return round(total, 2)
+
+    # ── Partial settlement ───────────────────────────────────────
+
+    def record_partial_settlement(
+        self,
+        batch_id: str,
+        net_payment_index: int,
+        amount: float,
+        reference: str = "",
+        metadata: Optional[dict] = None,
+    ) -> PartialSettlement:
+        """Record a partial payment toward a net obligation.
+
+        Allows agents to settle net positions incrementally. The batch must
+        be in CALCULATED or DISPUTED state (netting must have been computed).
+
+        Args:
+            batch_id: The settlement batch ID
+            net_payment_index: Index into batch.net_payments for this obligation
+            amount: Amount being paid in this partial settlement
+            reference: Optional external reference (e.g. txn hash)
+            metadata: Optional metadata
+
+        Returns:
+            The created PartialSettlement record
+        """
+        batch = self.get_batch(batch_id)
+        if batch.status not in (SettlementStatus.CALCULATED, SettlementStatus.DISPUTED):
+            raise PartialSettlementError(
+                f"Cannot record partial settlement in {batch.status.value} state — "
+                f"calculate netting first"
+            )
+        if amount <= 0:
+            raise PartialSettlementError("Partial settlement amount must be positive")
+        if net_payment_index < 0 or net_payment_index >= len(batch.net_payments):
+            raise PartialSettlementError(
+                f"Net payment index {net_payment_index} out of range "
+                f"(0..{len(batch.net_payments) - 1})"
+            )
+
+        net_payment = batch.net_payments[net_payment_index]
+        already_paid = self._paid_for_net_payment(batch, net_payment_index)
+        outstanding = round(net_payment.amount - already_paid, 2)
+        if amount > outstanding + 0.01:  # allow 1 cent tolerance
+            raise PartialSettlementError(
+                f"Partial settlement {amount} exceeds outstanding balance {outstanding} "
+                f"for {net_payment.payer} -> {net_payment.payee}"
+            )
+
+        record = PartialSettlement(
+            net_payment_index=net_payment_index,
+            payer=net_payment.payer,
+            payee=net_payment.payee,
+            amount=round(amount, 2),
+            currency=batch.currency,
+            reference=reference,
+            metadata=metadata or {},
+        )
+        batch.partial_settlements.append(record)
+        return record
+
+    def get_outstanding_balances(self, batch_id: str) -> list[dict]:
+        """Get the outstanding balance for each net payment.
+
+        Returns a list of dicts with payer, payee, total, paid, outstanding.
+        """
+        batch = self.get_batch(batch_id)
+        if not batch.net_payments:
+            return []
+        results = []
+        for idx, np in enumerate(batch.net_payments):
+            paid = self._paid_for_net_payment(batch, idx)
+            results.append({
+                "net_payment_index": idx,
+                "payer": np.payer,
+                "payee": np.payee,
+                "total": np.amount,
+                "paid": round(paid, 2),
+                "outstanding": round(np.amount - paid, 2),
+                "fully_settled": round(np.amount - paid, 2) <= 0.01,
+            })
+        return results
+
+    def is_fully_settled(self, batch_id: str) -> bool:
+        """Check if all net payments have been fully covered by partial settlements."""
+        balances = self.get_outstanding_balances(batch_id)
+        if not balances:
+            return False
+        return all(b["fully_settled"] for b in balances)
+
+    def settle_from_partials(self, batch_id: str) -> SettlementBatch:
+        """Mark a batch as settled if all net payments are fully covered.
+
+        This is an alternative to full settle() — it validates that partial
+        settlements cover all obligations, then finalizes the batch.
+        """
+        batch = self.get_batch(batch_id)
+        if batch.status not in (SettlementStatus.CALCULATED, SettlementStatus.DISPUTED):
+            raise PartialSettlementError(
+                f"Cannot settle from partials in {batch.status.value} state"
+            )
+        if not self.is_fully_settled(batch_id):
+            outstanding = [
+                f"{b['payer']} -> {b['payee']}: {b['outstanding']}"
+                for b in self.get_outstanding_balances(batch_id)
+                if not b["fully_settled"]
+            ]
+            raise PartialSettlementError(
+                f"Cannot settle — outstanding balances remain: {'; '.join(outstanding)}"
+            )
+
+        batch.status = SettlementStatus.SETTLED
+        batch.settled_at = datetime.now(timezone.utc)
+        if batch.proof:
+            batch.proof.settled_at = batch.settled_at
+            batch.proof.proof_hash = self._compute_proof_hash(batch, batch.proof)
+        return batch
+
+    @staticmethod
+    def _paid_for_net_payment(batch: SettlementBatch, idx: int) -> float:
+        """Sum all partial settlements for a given net payment index."""
+        return sum(
+            ps.amount for ps in batch.partial_settlements
+            if ps.net_payment_index == idx
+        )
+
+    # ── Optimization report ──────────────────────────────────────
+
+    def get_optimization_report(self, batch_id: str) -> dict:
+        """Generate a detailed netting optimization report.
+
+        Shows gross vs net volume, savings percentage, participant reduction,
+        and per-party breakdown.
+        """
+        batch = self.get_batch(batch_id)
+        if not batch.proof:
+            raise InvalidSettlementStateError(
+                "No proof — run calculate_netting first"
+            )
+
+        proof = batch.proof
+        savings_pct = (
+            round(proof.netted_savings / proof.total_gross_volume * 100, 2)
+            if proof.total_gross_volume > 0 else 0.0
+        )
+        payment_count = len(batch.net_payments)
+        item_count = len([i for i in batch.items if not i.disputed])
+
+        # Payment reduction ratio
+        payment_reduction = (
+            round((1 - payment_count / item_count) * 100, 2)
+            if item_count > 0 else 0.0
+        )
+
+        # Per-party breakdown
+        party_breakdown = []
+        for pos in batch.net_positions:
+            party_breakdown.append({
+                "party": pos.party,
+                "direction": pos.direction.value,
+                "gross_out": pos.gross_out,
+                "gross_in": pos.gross_in,
+                "net": pos.net,
+            })
+
+        return {
+            "batch_id": batch.id,
+            "batch_name": batch.name,
+            "currency": batch.currency,
+            "items": item_count,
+            "participants": proof.participant_count,
+            "fees": len(batch.fees),
+            "total_fees": self.get_total_fees(batch.id),
+            "net_payments": payment_count,
+            "gross_volume": proof.total_gross_volume,
+            "net_volume": proof.total_net_volume,
+            "netted_savings": proof.netted_savings,
+            "savings_percentage": savings_pct,
+            "payment_reduction_percentage": payment_reduction,
+            "partial_settlements": len(batch.partial_settlements),
+            "disputed_items": len([i for i in batch.items if i.disputed]),
+            "status": batch.status.value,
+            "party_breakdown": party_breakdown,
+        }
+
     # ── Internal ─────────────────────────────────────────────────
 
     @staticmethod
@@ -601,6 +1008,35 @@ class SettlementEngine:
                 }
                 for p in batch.net_payments
             ],
+            "fees": [
+                {
+                    "id": f.id,
+                    "fee_type": f.fee_type.value,
+                    "amount": f.amount,
+                    "currency": f.currency,
+                    "description": f.description,
+                    "allocation": f.allocation.value,
+                    "item_id": f.item_id,
+                    "reference": f.reference,
+                    "metadata": f.metadata,
+                    "created_at": f.created_at.isoformat(),
+                }
+                for f in batch.fees
+            ],
+            "partial_settlements": [
+                {
+                    "id": ps.id,
+                    "net_payment_index": ps.net_payment_index,
+                    "payer": ps.payer,
+                    "payee": ps.payee,
+                    "amount": ps.amount,
+                    "currency": ps.currency,
+                    "reference": ps.reference,
+                    "metadata": ps.metadata,
+                    "created_at": ps.created_at.isoformat(),
+                }
+                for ps in batch.partial_settlements
+            ],
             "proof": (
                 {
                     "settlement_id": batch.proof.settlement_id,
@@ -665,6 +1101,31 @@ class SettlementEngine:
                     payee=pay_d["payee"],
                     amount=pay_d["amount"],
                     currency=pay_d.get("currency", "USD"),
+                ))
+            for fee_d in bd.get("fees", []):
+                batch.fees.append(SettlementFee(
+                    id=fee_d["id"],
+                    fee_type=SettlementFeeType(fee_d.get("fee_type", "processing")),
+                    amount=fee_d["amount"],
+                    currency=fee_d.get("currency", "USD"),
+                    description=fee_d.get("description", ""),
+                    allocation=FeeAllocation(fee_d.get("allocation", "payer")),
+                    item_id=fee_d.get("item_id"),
+                    reference=fee_d.get("reference", ""),
+                    metadata=fee_d.get("metadata", {}),
+                    created_at=datetime.fromisoformat(fee_d["created_at"]) if "created_at" in fee_d else datetime.now(timezone.utc),
+                ))
+            for ps_d in bd.get("partial_settlements", []):
+                batch.partial_settlements.append(PartialSettlement(
+                    id=ps_d["id"],
+                    net_payment_index=ps_d["net_payment_index"],
+                    payer=ps_d["payer"],
+                    payee=ps_d["payee"],
+                    amount=ps_d["amount"],
+                    currency=ps_d.get("currency", "USD"),
+                    reference=ps_d.get("reference", ""),
+                    metadata=ps_d.get("metadata", {}),
+                    created_at=datetime.fromisoformat(ps_d["created_at"]) if "created_at" in ps_d else datetime.now(timezone.utc),
                 ))
             proof_d = bd.get("proof")
             if proof_d:

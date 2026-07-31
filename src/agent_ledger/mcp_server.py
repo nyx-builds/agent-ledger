@@ -26,6 +26,8 @@ from .settlement import (
     SettlementEngine,
     SettlementItemType,
     SettlementStatus,
+    SettlementFeeType,
+    FeeAllocation,
 )
 
 
@@ -1704,6 +1706,121 @@ TOOLS = [
             "required": ["batch_id"],
         },
     },
+    # ── Fee & Multi-Currency Tools (v1.2) ───────────────────────
+    {
+        "name": "add_settlement_fee",
+        "description": (
+            "Add a processing, network, gas, or FX fee to a settlement batch. "
+            "Fees are converted to the batch currency and affect net positions "
+            "based on allocation: payer (payer pays extra), payee (payee absorbs), "
+            "or split (50/50)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "batch_id": {"type": "string", "description": "Settlement batch ID"},
+                "fee_type": {
+                    "type": "string",
+                    "enum": ["processing", "network", "gas", "fx_spread", "late", "commission", "custom"],
+                    "description": "Type of fee",
+                    "default": "processing",
+                },
+                "amount": {"type": "number", "description": "Fee amount", "exclusiveMinimum": 0},
+                "currency": {"type": "string", "description": "Fee currency (converted to batch currency)", "default": ""},
+                "description": {"type": "string", "description": "Fee description", "default": ""},
+                "allocation": {
+                    "type": "string",
+                    "enum": ["payer", "payee", "split"],
+                    "description": "Who bears the fee cost",
+                    "default": "payer",
+                },
+                "item_id": {"type": "string", "description": "Link fee to a specific settlement item", "default": ""},
+                "reference": {"type": "string", "description": "External reference for dedup", "default": ""},
+            },
+            "required": ["batch_id", "amount"],
+        },
+    },
+    {
+        "name": "list_settlement_fees",
+        "description": "List all fees in a settlement batch, optionally filtered by item.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "batch_id": {"type": "string", "description": "Settlement batch ID"},
+                "item_id": {"type": "string", "description": "Filter fees linked to this item", "default": ""},
+            },
+            "required": ["batch_id"],
+        },
+    },
+    {
+        "name": "remove_settlement_fee",
+        "description": "Remove a fee from a settlement batch.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "batch_id": {"type": "string", "description": "Settlement batch ID"},
+                "fee_id": {"type": "string", "description": "Fee ID to remove"},
+            },
+            "required": ["batch_id", "fee_id"],
+        },
+    },
+    # ── Partial Settlement Tools (v1.2) ─────────────────────────
+    {
+        "name": "record_partial_settlement",
+        "description": (
+            "Record a partial payment toward a net obligation. Allows agents to "
+            "settle positions incrementally over time. Requires netting to be "
+            "calculated first."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "batch_id": {"type": "string", "description": "Settlement batch ID"},
+                "net_payment_index": {"type": "integer", "description": "Index into batch.net_payments (0-based)", "minimum": 0},
+                "amount": {"type": "number", "description": "Amount being paid", "exclusiveMinimum": 0},
+                "reference": {"type": "string", "description": "External reference (e.g. txn hash)", "default": ""},
+            },
+            "required": ["batch_id", "net_payment_index", "amount"],
+        },
+    },
+    {
+        "name": "get_outstanding_balances",
+        "description": "Get the outstanding (unsettled) balance for each net payment in a batch.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "batch_id": {"type": "string", "description": "Settlement batch ID"},
+            },
+            "required": ["batch_id"],
+        },
+    },
+    {
+        "name": "settle_from_partials",
+        "description": "Mark a batch as settled once all net payments are covered by partial settlements.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "batch_id": {"type": "string", "description": "Settlement batch ID"},
+            },
+            "required": ["batch_id"],
+        },
+    },
+    # ── Optimization Report (v1.2) ──────────────────────────────
+    {
+        "name": "get_settlement_optimization_report",
+        "description": (
+            "Generate a detailed netting optimization report: gross vs net volume, "
+            "savings percentage, payment reduction, per-party breakdown, fees, and "
+            "partial settlement status."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "batch_id": {"type": "string", "description": "Settlement batch ID"},
+            },
+            "required": ["batch_id"],
+        },
+    },
 ]
 
 
@@ -2282,6 +2399,90 @@ def _dispatch(ledger: Ledger, name: str, args: dict) -> Any:
             "settled_at": batch.proof.settled_at.isoformat() if batch.proof.settled_at else None,
         }
 
+    # ── Fee & Multi-Currency handlers (v1.2) ────────────────────────
+    elif name == "add_settlement_fee":
+        engine = _get_or_create_settlement_engine(ledger)
+        fee = engine.add_fee(
+            batch_id=args["batch_id"],
+            fee_type=SettlementFeeType(args.get("fee_type", "processing")),
+            amount=args["amount"],
+            currency=args.get("currency") or None,
+            description=args.get("description", ""),
+            allocation=FeeAllocation(args.get("allocation", "payer")),
+            item_id=args.get("item_id") or None,
+            reference=args.get("reference", ""),
+        )
+        _persist_settlement_engine(ledger, engine)
+        return {
+            "id": fee.id,
+            "fee_type": fee.fee_type.value,
+            "amount": fee.amount,
+            "currency": fee.currency,
+            "description": fee.description,
+            "allocation": fee.allocation.value,
+            "item_id": fee.item_id,
+            "reference": fee.reference,
+        }
+
+    elif name == "list_settlement_fees":
+        engine = _get_or_create_settlement_engine(ledger)
+        item_id = args.get("item_id") or None
+        fees = engine.list_fees(args["batch_id"], item_id=item_id)
+        return [
+            {
+                "id": f.id,
+                "fee_type": f.fee_type.value,
+                "amount": f.amount,
+                "currency": f.currency,
+                "description": f.description,
+                "allocation": f.allocation.value,
+                "item_id": f.item_id,
+                "reference": f.reference,
+            }
+            for f in fees
+        ]
+
+    elif name == "remove_settlement_fee":
+        engine = _get_or_create_settlement_engine(ledger)
+        engine.remove_fee(args["batch_id"], args["fee_id"])
+        _persist_settlement_engine(ledger, engine)
+        return {"removed": True, "fee_id": args["fee_id"]}
+
+    # ── Partial Settlement handlers (v1.2) ──────────────────────────
+    elif name == "record_partial_settlement":
+        engine = _get_or_create_settlement_engine(ledger)
+        ps = engine.record_partial_settlement(
+            batch_id=args["batch_id"],
+            net_payment_index=args["net_payment_index"],
+            amount=args["amount"],
+            reference=args.get("reference", ""),
+        )
+        _persist_settlement_engine(ledger, engine)
+        return {
+            "id": ps.id,
+            "net_payment_index": ps.net_payment_index,
+            "payer": ps.payer,
+            "payee": ps.payee,
+            "amount": ps.amount,
+            "currency": ps.currency,
+            "reference": ps.reference,
+        }
+
+    elif name == "get_outstanding_balances":
+        engine = _get_or_create_settlement_engine(ledger)
+        return engine.get_outstanding_balances(args["batch_id"])
+
+    elif name == "settle_from_partials":
+        engine = _get_or_create_settlement_engine(ledger)
+        batch = engine.settle_from_partials(args["batch_id"])
+        _persist_settlement_engine(ledger, engine)
+        return _settlement_batch_to_dict(batch)
+
+    # ── Optimization Report (v1.2) ──────────────────────────────────
+    elif name == "get_settlement_optimization_report":
+        engine = _get_or_create_settlement_engine(ledger)
+        return engine.get_optimization_report(args["batch_id"])
+
     else:
         raise LedgerError(f"Unknown tool: {name}")
 
@@ -2312,9 +2513,22 @@ def _serialize_tree_node(node: dict) -> dict:
 
 
 def _get_or_create_settlement_engine(ledger: Ledger) -> SettlementEngine:
-    """Get the settlement engine from ledger metadata, or create one."""
+    """Get the settlement engine from ledger metadata, or create one.
+
+    Wires up an FX converter from the ledger's stored exchange rates so
+    that multi-currency settlement items are automatically converted to
+    the batch settlement currency during netting.
+    """
     engine_data = ledger.data.metadata.get("settlements")
-    engine = SettlementEngine()
+
+    # Build FX converter from ledger exchange rates
+    from .currency import CurrencyConverter
+    converter = CurrencyConverter(rates=ledger.data.exchange_rates)
+
+    def fx_convert(amount: float, from_cur: str, to_cur: str) -> float:
+        return converter.convert(amount, from_cur, to_cur)
+
+    engine = SettlementEngine(fx_converter=fx_convert)
     if engine_data:
         engine.from_dict(engine_data)
     return engine
@@ -2340,7 +2554,9 @@ def _settlement_batch_summary(batch) -> dict:
         "status": batch.status.value,
         "currency": batch.currency,
         "item_count": len(batch.items),
+        "fee_count": len(batch.fees),
         "disputed_count": sum(1 for i in batch.items if i.disputed),
+        "partial_settlement_count": len(batch.partial_settlements),
         "total_gross_volume": batch.proof.total_gross_volume if batch.proof else 0.0,
         "total_net_volume": batch.proof.total_net_volume if batch.proof else 0.0,
         "created_at": batch.created_at.isoformat(),
