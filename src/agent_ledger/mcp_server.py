@@ -1821,6 +1821,76 @@ TOOLS = [
             "required": ["batch_id"],
         },
     },
+    # ── Financial Forecasting (v1.3) ────────────────────────────
+    {
+        "name": "generate_financial_forecast",
+        "description": (
+            "Generate a multi-period financial forecast projecting revenue, expenses, "
+            "net income, and cash position. Three methods available: linear regression "
+            "(best for steady growth), moving average (conservative, robust to spikes), "
+            "Holt's exponential smoothing (adapts to changing trends). Includes cash "
+            "runway estimation and backtested fit quality (MAPE)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "periods_ahead": {"type": "integer", "description": "Number of future periods to project", "default": 6},
+                "method": {"type": "string", "enum": ["linear", "ma", "holt"], "description": "Forecasting algorithm", "default": "linear"},
+                "frequency": {"type": "string", "enum": ["monthly", "quarterly", "weekly"], "description": "Aggregation frequency", "default": "monthly"},
+                "history_periods": {"type": "integer", "description": "Number of past periods for fitting", "default": 12},
+                "scenario": {"type": "string", "enum": ["best", "base", "worst"], "description": "Growth scenario", "default": "base"},
+                "include_cash": {"type": "boolean", "description": "Whether to compute cash runway", "default": True},
+            },
+        },
+    },
+    {
+        "name": "forecast_cash_runway",
+        "description": (
+            "Compute cash runway — how many periods until the projected cash balance "
+            "hits zero based on historical revenue and expense trends. Returns current "
+            "cash, projected monthly balances, depletion point, and minimum balance."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "periods_ahead": {"type": "integer", "description": "Max periods to project forward", "default": 24},
+                "frequency": {"type": "string", "enum": ["monthly", "quarterly", "weekly"], "description": "Aggregation frequency", "default": "monthly"},
+                "scenario": {"type": "string", "enum": ["best", "base", "worst"], "description": "Growth scenario", "default": "base"},
+            },
+        },
+    },
+    {
+        "name": "compare_scenarios",
+        "description": (
+            "Run all three scenarios (best, base, worst) side by side to compare "
+            "projected revenue, expenses, net income, and cash runway under different "
+            "growth assumptions."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "periods_ahead": {"type": "integer", "description": "Number of future periods to project", "default": 6},
+                "method": {"type": "string", "enum": ["linear", "ma", "holt"], "description": "Forecasting algorithm", "default": "linear"},
+                "frequency": {"type": "string", "enum": ["monthly", "quarterly", "weekly"], "description": "Aggregation frequency", "default": "monthly"},
+                "history_periods": {"type": "integer", "description": "Number of past periods for fitting", "default": 12},
+            },
+        },
+    },
+    {
+        "name": "get_forecast_accuracy",
+        "description": (
+            "Backtest all three forecasting methods against historical data and "
+            "report which model best fits the data. Returns MAPE (mean absolute "
+            "percentage error) for each method and a recommendation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "frequency": {"type": "string", "enum": ["monthly", "quarterly", "weekly"], "description": "Aggregation frequency", "default": "monthly"},
+                "history_periods": {"type": "integer", "description": "Number of past periods for fitting", "default": 12},
+            },
+        },
+    },
 ]
 
 
@@ -2482,6 +2552,89 @@ def _dispatch(ledger: Ledger, name: str, args: dict) -> Any:
     elif name == "get_settlement_optimization_report":
         engine = _get_or_create_settlement_engine(ledger)
         return engine.get_optimization_report(args["batch_id"])
+
+    # ── Financial Forecasting (v1.3) ────────────────────────────
+    elif name == "generate_financial_forecast":
+        from .forecast import generate_forecast, ForecastMethod, PeriodFrequency, Scenario, format_forecast
+        forecast = generate_forecast(
+            ledger,
+            periods_ahead=args.get("periods_ahead", 6),
+            method=ForecastMethod(args.get("method", "linear")),
+            freq=PeriodFrequency(args.get("frequency", "monthly")),
+            history_periods=args.get("history_periods", 12),
+            scenario=Scenario(args.get("scenario", "base")),
+            include_cash=args.get("include_cash", True),
+        )
+        return forecast.to_dict()
+
+    elif name == "forecast_cash_runway":
+        from .forecast import generate_forecast, ForecastMethod, PeriodFrequency, Scenario, _cash_forecast_to_dict
+        forecast = generate_forecast(
+            ledger,
+            periods_ahead=args.get("periods_ahead", 24),
+            method=ForecastMethod.LINEAR,
+            freq=PeriodFrequency(args.get("frequency", "monthly")),
+            history_periods=12,
+            scenario=Scenario(args.get("scenario", "base")),
+            include_cash=True,
+        )
+        if forecast.cash:
+            return _cash_forecast_to_dict(forecast.cash)
+        return {"error": "Cash forecast not available"}
+
+    elif name == "compare_scenarios":
+        from .forecast import generate_forecast, ForecastMethod, PeriodFrequency, Scenario, forecast_summary_dict
+        method = ForecastMethod(args.get("method", "linear"))
+        freq = PeriodFrequency(args.get("frequency", "monthly"))
+        history_periods = args.get("history_periods", 12)
+        periods_ahead = args.get("periods_ahead", 6)
+        results = {}
+        for sc in [Scenario.BEST, Scenario.BASE, Scenario.WORST]:
+            f = generate_forecast(
+                ledger, periods_ahead=periods_ahead, method=method,
+                freq=freq, history_periods=history_periods, scenario=sc,
+                include_cash=True,
+            )
+            results[sc.value] = forecast_summary_dict(f)
+        return results
+
+    elif name == "get_forecast_accuracy":
+        from .forecast import collect_history, _backtest_linear, _backtest_ma, _backtest_holt, PeriodFrequency
+        freq = PeriodFrequency(args.get("frequency", "monthly"))
+        history_periods = args.get("history_periods", 12)
+        history = collect_history(ledger, history_periods, freq)
+        rev_values = [p.revenue for p in history]
+        exp_values = [p.expenses for p in history]
+        results = {}
+        for label, backtest_fn in [("linear", _backtest_linear), ("ma", _backtest_ma), ("holt", _backtest_holt)]:
+            rev_mape = backtest_fn(rev_values)
+            exp_mape = backtest_fn(exp_values)
+            avg_mape = None
+            if rev_mape is not None and exp_mape is not None:
+                avg_mape = round((rev_mape + exp_mape) / 2, 2)
+            elif rev_mape is not None:
+                avg_mape = round(rev_mape, 2)
+            elif exp_mape is not None:
+                avg_mape = round(exp_mape, 2)
+            results[label] = {
+                "revenue_mape": round(rev_mape, 2) if rev_mape is not None else None,
+                "expenses_mape": round(exp_mape, 2) if exp_mape is not None else None,
+                "avg_mape": avg_mape,
+            }
+        # Recommend the best
+        best_method = min(
+            (k for k, v in results.items() if v["avg_mape"] is not None),
+            key=lambda k: results[k]["avg_mape"],
+            default=None,
+        )
+        results["recommended"] = best_method
+        results["data_points"] = len(rev_values)
+        results["note"] = (
+            f"Based on {len(rev_values)} historical {freq.value} periods. "
+            f"Recommendation: use '{best_method}' method for lowest error."
+            if best_method else "Insufficient data for reliable recommendation (need 4+ periods)."
+        )
+        return results
 
     else:
         raise LedgerError(f"Unknown tool: {name}")

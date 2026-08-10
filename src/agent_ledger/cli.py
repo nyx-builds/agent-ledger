@@ -1179,5 +1179,110 @@ def api_key_revoke(ctx, key_id):
     console.print(f"[green]✓[/green] Revoked: {key_id}")
 
 
+# ── Forecast Commands (v1.3) ───────────────────────────────────
+
+
+@cli.group("forecast")
+@click.pass_context
+def forecast(ctx):
+    """Financial forecasting — project revenue, expenses, and cash runway."""
+
+
+@forecast.command("generate")
+@click.option("--periods", "-p", "periods_ahead", default=6, type=int, help="Periods to project")
+@click.option("--method", "-m", "method", default="linear",
+              type=click.Choice(["linear", "ma", "holt"]), help="Forecast method")
+@click.option("--frequency", "-f", "freq", default="monthly",
+              type=click.Choice(["monthly", "quarterly", "weekly"]), help="Frequency")
+@click.option("--history", "history_periods", default=12, type=int, help="Historical periods to fit on")
+@click.option("--scenario", "-s", default="base",
+              type=click.Choice(["best", "base", "worst"]), help="Growth scenario")
+@click.option("--no-cash", is_flag=True, help="Skip cash runway calculation")
+@click.pass_context
+def forecast_generate(ctx, periods_ahead, method, freq, history_periods, scenario, no_cash):
+    """Generate a financial forecast."""
+    from .forecast import generate_forecast, ForecastMethod, PeriodFrequency, Scenario, format_forecast
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    forecast = generate_forecast(
+        ledger, periods_ahead=periods_ahead, method=ForecastMethod(method),
+        freq=PeriodFrequency(freq), history_periods=history_periods,
+        scenario=Scenario(scenario), include_cash=not no_cash,
+    )
+    console.print(format_forecast(forecast))
+
+
+@forecast.command("runway")
+@click.option("--periods", "-p", default=24, type=int, help="Max periods to project")
+@click.option("--frequency", "-f", "freq", default="monthly",
+              type=click.Choice(["monthly", "quarterly", "weekly"]))
+@click.option("--scenario", "-s", default="base",
+              type=click.Choice(["best", "base", "worst"]))
+@click.pass_context
+def forecast_runway(ctx, periods, freq, scenario):
+    """Estimate cash runway until depletion."""
+    from .forecast import generate_forecast, ForecastMethod, PeriodFrequency, Scenario
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    forecast = generate_forecast(
+        ledger, periods_ahead=periods, method=ForecastMethod.LINEAR,
+        freq=PeriodFrequency(freq), scenario=Scenario(scenario), include_cash=True,
+    )
+    if forecast.cash:
+        c = forecast.cash
+        console.print(f"\n[bold]Cash Runway Analysis[/bold] ({scenario})")
+        console.print(f"  Current Cash:    ${c.current_cash:,.2f}")
+        console.print(f"  Runway:          {c.runway_label}")
+        console.print(f"  Depletes:        {'Yes — ' + c.depletion_month if (c.depletes and c.depletion_month) else 'No'}")
+        console.print(f"  Min Balance:     ${c.min_balance:,.2f}")
+        console.print()
+        for p in c.points:
+            bal_str = f"${p.projected_cash:,.2f}" if p.projected_cash is not None else "—"
+            console.print(f"  {p.label:<16} {bal_str:>14}")
+    else:
+        console.print("[yellow]No cash forecast available.[/yellow]")
+
+
+@forecast.command("scenarios")
+@click.option("--periods", "-p", "periods_ahead", default=6, type=int)
+@click.option("--method", "-m", "method", default="linear",
+              type=click.Choice(["linear", "ma", "holt"]))
+@click.pass_context
+def forecast_scenarios(ctx, periods_ahead, method):
+    """Compare best/base/worst scenarios."""
+    from .forecast import generate_forecast, ForecastMethod, PeriodFrequency, Scenario, forecast_summary_dict
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    console.print("\n[bold]Scenario Comparison[/bold]")
+    for sc in [Scenario.BEST, Scenario.BASE, Scenario.WORST]:
+        f = generate_forecast(
+            ledger, periods_ahead=periods_ahead, method=ForecastMethod(method),
+            freq=PeriodFrequency.MONTHLY, scenario=sc, include_cash=True,
+        )
+        s = forecast_summary_dict(f)
+        console.print(f"\n  [{sc.value.upper()}]")
+        console.print(f"    Total Revenue:    ${s['total_projected_revenue']:,.2f}")
+        console.print(f"    Total Expenses:   ${s['total_projected_expenses']:,.2f}")
+        console.print(f"    Net Income:       ${s['total_projected_net']:,.2f}")
+        if s.get("runway_label"):
+            console.print(f"    Runway:           {s['runway_label']}")
+
+
+@forecast.command("accuracy")
+@click.option("--history", "history_periods", default=12, type=int)
+@click.pass_context
+def forecast_accuracy(ctx, history_periods):
+    """Backtest models to find which fits best."""
+    from .forecast import collect_history, _backtest_linear, _backtest_ma, _backtest_holt, PeriodFrequency
+    ledger = get_ledger(ctx.obj["ledger_file"])
+    history = collect_history(ledger, history_periods, PeriodFrequency.MONTHLY)
+    rev_values = [p.revenue for p in history]
+    exp_values = [p.expenses for p in history]
+    console.print(f"\n[bold]Forecast Model Accuracy[/bold] ({len(rev_values)} periods)")
+    for label, fn in [("Linear", _backtest_linear), ("Moving Avg", _backtest_ma), ("Holt", _backtest_holt)]:
+        rev_mape = fn(rev_values)
+        exp_mape = fn(exp_values)
+        rev_str = f"{rev_mape:.1f}%" if rev_mape else "n/a"
+        exp_str = f"{exp_mape:.1f}%" if exp_mape else "n/a"
+        console.print(f"  {label:<14} Rev MAPE: {rev_str:>8}  Exp MAPE: {exp_str:>8}")
+
+
 if __name__ == "__main__":
     cli()

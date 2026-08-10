@@ -7,9 +7,9 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![CI](https://github.com/nyx-builds/agent-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/nyx-builds/agent-ledger/actions/workflows/ci.yml)
-[![Tests: 873](https://img.shields.io/badge/tests-873%20passing-brightgreen.svg)](#testing)
+[![Tests: 972](https://img.shields.io/badge/tests-972%20passing-brightgreen.svg)](#testing)
 |[![MCP](https://img.shields.io/badge/MCP-server-7c3aed)](https://modelcontextprotocol.io)
-|[![Version: 1.2.0](https://img.shields.io/badge/version-1.2.0-blue.svg)](#changelog)
+|[![Version: 1.3.0](https://img.shields.io/badge/version-1.3.0-blue.svg)](#changelog)
 
 </div>
 
@@ -42,6 +42,7 @@ Create and manage a chart of accounts, post journal entries with full double-ent
 - **Settlement Fees** — Processing, network, gas, FX spread, and commission fees with payer/payee/split allocation
 - **Partial Settlement** — Settle net positions incrementally over time with outstanding balance tracking
 - **Optimization Reports** — Gross vs net volume analysis, savings percentage, payment reduction metrics
+- **Financial Forecasting** — Project revenue, expenses, and cash position using linear regression, moving average, or Holt's exponential smoothing with scenario modeling and cash runway estimation
 - **Data Persistence** — JSON-based storage, portable and human-readable
 - **CLI** — Full-featured Click CLI with rich output
 - **MCP Server** — Model Context Protocol server for autonomous agent integration
@@ -195,6 +196,19 @@ src/agent_ledger/
 ```
 
 ## Changelog
+
+### v1.3.0
+- **Financial Forecasting Engine**: Project future revenue, expenses, net income, and cash position using three statistical methods:
+  - **Linear Regression** — Least-squares fit, best for steady growth/decline trends
+  - **Moving Average** — Conservative windowed average, robust to one-off spikes
+  - **Holt's Exponential Smoothing** — Adaptive level+trend model for changing trends
+- **Scenario Modeling**: Best (+25% growth), base (trend), and worst (-35% growth) scenarios for sensitivity analysis
+- **Cash Runway Estimation**: Project forward cash balance and calculate months until depletion
+- **Forecast Accuracy Backtesting**: Walk-forward validation with MAPE (mean absolute percentage error) for model selection
+- **Period Frequencies**: Monthly, quarterly, or weekly aggregation
+- 4 new MCP tools (109 total): `generate_financial_forecast`, `forecast_cash_runway`, `compare_scenarios`, `get_forecast_accuracy`
+- 4 new CLI commands: `forecast generate`, `forecast runway`, `forecast scenarios`, `forecast accuracy`
+- 99 new tests (972 total)
 
 ### v1.2.0
 - **Multi-Currency Settlement**: Items in different currencies are automatically FX-converted to the batch settlement currency before netting. The MCP server auto-wires the ledger's exchange rates as an FX converter.
